@@ -22,14 +22,23 @@ from utils.convert_to_executorch import (
 def ptq_model(args, model, model_args=None):
     transformers.set_seed(args.seed)
     model.eval()
+    args.r3 = args.k_bits < 16 if args.r3 is None else args.r3
+    args.r4 = args.rotate if args.r4 is None else args.r4
 
     # Rotate the weights
     if args.rotate:
         fuse_norm_utils.fuse_layer_norms(model)
         rotation_utils.rotate_model(model, args)
         utils.cleanup_memory(verbos=True)
+    elif args.r4:
+        # R4 may also be used without R1/R2; both sides must be transformed.
+        for layer in model.model.layers:
+            hadamard_utils.apply_exact_had_to_linear(
+                layer.mlp.down_proj, had_dim=-1, output=False
+            )
 
-        quant_utils.add_actquant(model)  # Add Activation Wrapper to the model
+    quant_utils.add_actquant(model)  # Add Activation Wrapper to the model
+    if args.r4:
         qlayers = quant_utils.find_qlayers(model)
         for name in qlayers:
             if "down_proj" in name:
@@ -38,10 +47,6 @@ def ptq_model(args, model, model_args=None):
                 qlayers[name].had_K = had_K
                 qlayers[name].K = K
                 qlayers[name].fp32_had = args.fp32_had
-    else:
-        quant_utils.add_actquant(
-            model
-        )  # Add Activation Wrapper to the model as the rest of the code assumes it is present
 
     if args.w_bits < 16:
         save_dict = {}
@@ -134,13 +139,14 @@ def ptq_model(args, model, model_args=None):
                 clip_ratio=layer_a_clip,
             )
 
-    if args.k_bits < 16:
+    if args.r3 or args.k_bits < 16:
         if args.k_pre_rope:
             raise NotImplementedError("Pre-RoPE quantization is not supported yet!")
         else:
             rope_function_name = "apply_rotary_pos_emb"
             layers = model.model.layers
             k_quant_config = {
+                "r3": args.r3,
                 "k_bits": args.k_bits,
                 "k_groupsize": args.k_groupsize,
                 "k_sym": not (args.k_asym),

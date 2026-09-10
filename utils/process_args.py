@@ -56,9 +56,15 @@ def parser_gen():
         "--rotate",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="""Rotate the moodel. This will include online rotation for down-projection and
-                        out-projection. Note that this does not apply rotation to the K/Q and they will be rotated
-                        if we want to quantize the Keys""",
+        help="Apply R1/R2 rotations. R3/R4 can be controlled separately.",
+    )
+    parser.add_argument(
+        "--r3", action=argparse.BooleanOptionalAction, default=None,
+        help="Enable/disable Q/K rotation independently of K quantization. Default: enabled when k_bits < 16.",
+    )
+    parser.add_argument(
+        "--r4", action=argparse.BooleanOptionalAction, default=None,
+        help="Enable/disable MLP rotation. Default: enabled during optimization, follows --rotate during PTQ.",
     )
     parser.add_argument(
         "--rotate_mode", type=str, default="hadamard", choices=["hadamard", "random"]

@@ -89,15 +89,16 @@ def rotate_mlp_input(layer, R1):
         W.weight.data = torch.matmul(W_, R1).to(device="cpu", dtype=dtype)
 
 
-def rotate_mlp_output(layer, R1):
+def rotate_mlp_output(layer, R1, r4=True):
     # Rotate the MLP output weights and bias.
     W = layer.mlp.down_proj
     dtype = W.weight.data.dtype
     W_ = W.weight.data.to(device="cuda", dtype=torch.float64)
     W.weight.data = torch.matmul(R1.T, W_).to(device="cpu", dtype=dtype)
-    apply_exact_had_to_linear(
-        W, had_dim=-1, output=False
-    )  # apply exact (inverse) hadamard on the weights of mlp output
+    if r4:
+        apply_exact_had_to_linear(
+            W, had_dim=-1, output=False
+        )  # apply exact (inverse) hadamard on the weights of mlp output
     if W.bias is not None:
         b = W.bias.data.to(device="cuda", dtype=torch.float64)
         W.bias.data = torch.matmul(R1.T, b).to(device="cpu", dtype=dtype)
@@ -143,7 +144,7 @@ def rotate_model(model, args):
         rotate_attention_inputs(layers[idx], R1)
         rotate_attention_output(layers[idx], R1)
         rotate_mlp_input(layers[idx], R1)
-        rotate_mlp_output(layers[idx], R1)
+        rotate_mlp_output(layers[idx], R1, r4=args.r4)
         rotate_ov_proj(layers[idx], num_heads, head_dim, R2=R2)
 
 
@@ -154,14 +155,14 @@ class QKRotationWrapper(torch.nn.Module):
         num_heads = config.num_attention_heads
         model_dim = config.hidden_size
         head_dim = model_dim // num_heads
-        assert is_pow2(
-            head_dim
-        ), f"Only power of 2 head_dim is supported for K-cache Quantization!"
+        self.r3 = kwargs.get("r3", True)
+        if self.r3:
+            assert is_pow2(head_dim), "R3 requires a power-of-two head_dim!"
         self.func = func
         self.k_quantizer = quant_utils.ActQuantizer()
         self.k_bits = 16
         if kwargs is not None:
-            assert kwargs["k_groupsize"] in [
+            assert kwargs["k_bits"] >= 16 or kwargs["k_groupsize"] in [
                 -1,
                 head_dim,
             ], f"Only token-wise/{head_dim}g quantization is supported for K-cache"
@@ -179,8 +180,11 @@ class QKRotationWrapper(torch.nn.Module):
     def forward(self, *args, **kwargs):
         q, k = self.func(*args, **kwargs)
         dtype = q.dtype
-        q = (HadamardTransform.apply(q.float()) / math.sqrt(q.shape[-1])).to(dtype)
-        k = (HadamardTransform.apply(k.float()) / math.sqrt(k.shape[-1])).to(dtype)
+        if self.r3:
+            q = (HadamardTransform.apply(q.float()) / math.sqrt(q.shape[-1])).to(dtype)
+            k = (HadamardTransform.apply(k.float()) / math.sqrt(k.shape[-1])).to(dtype)
+        if self.k_bits >= 16:
+            return q, k
         (bsz, num_heads, seq_len, head_dim) = k.shape
 
         if self.k_groupsize == -1:  # token-wise quantization
@@ -193,7 +197,7 @@ class QKRotationWrapper(torch.nn.Module):
                 .to(q)
             )
         else:  # head-wise quantization
-            per_head_k = k.view(-1, head_dim)
+            per_head_k = k.reshape(-1, head_dim)
             self.k_quantizer.find_params(per_head_k)
             k = (
                 self.k_quantizer(per_head_k)

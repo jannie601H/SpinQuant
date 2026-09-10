@@ -51,14 +51,14 @@ class QKRotationWrapper(torch.nn.Module):
         num_heads = config.num_attention_heads
         model_dim = config.hidden_size
         head_dim = model_dim // num_heads
-        assert is_pow2(
-            head_dim
-        ), f"Only power of 2 head_dim is supported for K-cache Quantization!"
+        self.r3 = kwargs.get("r3", True)
+        if self.r3:
+            assert is_pow2(head_dim), "R3 requires a power-of-two head_dim!"
         self.func = func
         self.k_quantizer = quant_utils.ActQuantizer()
         self.k_bits = 16
         if kwargs is not None:
-            assert kwargs["k_groupsize"] in [
+            assert kwargs["k_bits"] >= 16 or kwargs["k_groupsize"] in [
                 -1,
                 head_dim,
             ], f"Only token-wise/{head_dim}g quantization is supported for K-cache"
@@ -76,8 +76,11 @@ class QKRotationWrapper(torch.nn.Module):
     def forward(self, *args, **kwargs):
         q, k = self.func(*args, **kwargs)
         dtype = q.dtype
-        q = (HadamardTransform.apply(q.float()) / math.sqrt(q.shape[-1])).to(dtype)
-        k = (HadamardTransform.apply(k.float()) / math.sqrt(k.shape[-1])).to(dtype)
+        if self.r3:
+            q = (HadamardTransform.apply(q.float()) / math.sqrt(q.shape[-1])).to(dtype)
+            k = (HadamardTransform.apply(k.float()) / math.sqrt(k.shape[-1])).to(dtype)
+        if self.k_bits >= 16:
+            return q, k
         (bsz, num_heads, seq_len, head_dim) = k.shape
 
         if self.k_groupsize == -1:  # token-wise quantization
@@ -90,7 +93,7 @@ class QKRotationWrapper(torch.nn.Module):
                 .to(q)
             )
         else:  # head-wise quantization
-            per_head_k = k.view(-1, head_dim)
+            per_head_k = k.reshape(-1, head_dim)
             self.k_quantizer.find_params(per_head_k)
             k = (
                 self.k_quantizer(per_head_k)

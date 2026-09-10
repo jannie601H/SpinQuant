@@ -1,0 +1,289 @@
+2026-09-10 11:37:01,564 - spinquant - INFO - the rank is 0
+[rank0]:[W910 11:37:01.702685520 ProcessGroupNCCL.cpp:4561] [PG ID 0 PG GUID 0 Rank 0]  using GPU 0 to perform barrier as devices used by this process are currently unknown. This can potentially cause a hang if this rank to GPU mapping is incorrect. Specify device_ids in barrier() to force use of a particular device, or call init_process_group() with a device_id.
+Some weights of LlamaForCausalLM were not initialized from the model checkpoint at meta-llama/Llama-3.2-1B and are newly initialized: ['lm_head.weight']
+You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
+/home/aiuser/spinquant-env/lib/python3.10/site-packages/transformers/modeling_utils.py:4713: FutureWarning: `_is_quantized_training_enabled` is going to be deprecated in transformers 4.39.0. Please use `model.hf_quantizer.is_trainable` instead
+  warnings.warn(
+
+Inserting weight quantizer:   0%|          | 0/16 [00:00<?, ?it/s]
+Inserting weight quantizer:   6%|▋         | 1/16 [00:00<00:03,  4.25it/s]
+Inserting weight quantizer:  12%|█▎        | 2/16 [00:00<00:02,  6.18it/s]
+Inserting weight quantizer:  19%|█▉        | 3/16 [00:00<00:01,  6.75it/s]
+Inserting weight quantizer:  25%|██▌       | 4/16 [00:00<00:01,  7.54it/s]
+Inserting weight quantizer:  31%|███▏      | 5/16 [00:00<00:01,  8.11it/s]
+Inserting weight quantizer:  38%|███▊      | 6/16 [00:00<00:01,  8.51it/s]
+Inserting weight quantizer:  44%|████▍     | 7/16 [00:00<00:01,  8.60it/s]
+Inserting weight quantizer:  50%|█████     | 8/16 [00:01<00:00,  8.88it/s]
+Inserting weight quantizer:  56%|█████▋    | 9/16 [00:01<00:00,  9.14it/s]
+Inserting weight quantizer:  62%|██████▎   | 10/16 [00:01<00:00,  9.16it/s]
+Inserting weight quantizer:  69%|██████▉   | 11/16 [00:01<00:00,  9.33it/s]
+Inserting weight quantizer:  75%|███████▌  | 12/16 [00:01<00:00,  9.20it/s]
+Inserting weight quantizer:  88%|████████▊ | 14/16 [00:01<00:00,  9.01it/s]
+Inserting weight quantizer:  94%|█████████▍| 15/16 [00:01<00:00,  8.77it/s]
+Inserting weight quantizer: 100%|██████████| 16/16 [00:01<00:00,  8.69it/s]
+Inserting weight quantizer: 100%|██████████| 16/16 [00:01<00:00,  8.37it/s]
+2026-09-10 11:37:20,201 - spinquant - INFO - Model init completed for training LlamaForCausalLM(
+  (model): LlamaModel(
+    (embed_tokens): Embedding(128256, 2048)
+    (layers): ModuleList(
+      (0-15): 16 x LlamaDecoderLayer(
+        (self_attn): LlamaSdpaAttention(
+          (q_proj): ActQuantWrapper(
+            Input Quantizer Bits: 8 (Asymmetric Per-Token)
+            Output Quantizer Bits: 16
+            (module): QuantizeLinear(
+              in_features=2048, out_features=2048, bias=False
+              (quantizer): WeightQuantizer()
+            )
+            (quantizer): ActQuantizer()
+            (out_quantizer): ActQuantizer()
+          )
+          (k_proj): ActQuantWrapper(
+            Input Quantizer Bits: 8 (Asymmetric Per-Token)
+            Output Quantizer Bits: 16
+            (module): QuantizeLinear(
+              in_features=2048, out_features=512, bias=False
+              (quantizer): WeightQuantizer()
+            )
+            (quantizer): ActQuantizer()
+            (out_quantizer): ActQuantizer()
+          )
+          (v_proj): ActQuantWrapper(
+            Input Quantizer Bits: 8 (Asymmetric Per-Token)
+            Output Quantizer Bits: 16
+            (module): QuantizeLinear(
+              in_features=2048, out_features=512, bias=False
+              (quantizer): WeightQuantizer()
+            )
+            (quantizer): ActQuantizer()
+            (out_quantizer): ActQuantizer()
+          )
+          (o_proj): ActQuantWrapper(
+            Input Quantizer Bits: 8 (Asymmetric Per-Token)
+            Output Quantizer Bits: 16
+            (module): QuantizeLinear(
+              in_features=2048, out_features=2048, bias=False
+              (quantizer): WeightQuantizer()
+            )
+            (quantizer): ActQuantizer()
+            (out_quantizer): ActQuantizer()
+          )
+          (rotary_emb): LlamaRotaryEmbedding()
+          (R2): RotateModule()
+        )
+        (mlp): LlamaMLP(
+          (gate_proj): ActQuantWrapper(
+            Input Quantizer Bits: 8 (Asymmetric Per-Token)
+            Output Quantizer Bits: 16
+            (module): QuantizeLinear(
+              in_features=2048, out_features=8192, bias=False
+              (quantizer): WeightQuantizer()
+            )
+            (quantizer): ActQuantizer()
+            (out_quantizer): ActQuantizer()
+          )
+          (up_proj): ActQuantWrapper(
+            Input Quantizer Bits: 8 (Asymmetric Per-Token)
+            Output Quantizer Bits: 16
+            (module): QuantizeLinear(
+              in_features=2048, out_features=8192, bias=False
+              (quantizer): WeightQuantizer()
+            )
+            (quantizer): ActQuantizer()
+            (out_quantizer): ActQuantizer()
+          )
+          (down_proj): ActQuantWrapper(
+            Input Quantizer Bits: 8 (Asymmetric Per-Token)
+            Output Quantizer Bits: 16
+            (module): QuantizeLinear(
+              in_features=8192, out_features=2048, bias=False
+              (quantizer): WeightQuantizer()
+            )
+            (quantizer): ActQuantizer()
+            (out_quantizer): ActQuantizer()
+          )
+          (act_fn): SiLU()
+        )
+        (input_layernorm): LlamaRMSNorm((2048,), eps=1e-05)
+        (post_attention_layernorm): LlamaRMSNorm((2048,), eps=1e-05)
+      )
+    )
+    (norm): LlamaRMSNorm((2048,), eps=1e-05)
+    (rotary_emb): LlamaRotaryEmbedding()
+  )
+  (lm_head): ActQuantWrapper(
+    Input Quantizer Bits: 16
+    Output Quantizer Bits: 16
+    (module): Linear(in_features=2048, out_features=128256, bias=False)
+    (quantizer): ActQuantizer()
+    (out_quantizer): ActQuantizer()
+  )
+  (R1): RotateModule()
+)
+INFO:spinquant:Model init completed for training LlamaForCausalLM(
+  (model): LlamaModel(
+    (embed_tokens): Embedding(128256, 2048)
+    (layers): ModuleList(
+      (0-15): 16 x LlamaDecoderLayer(
+        (self_attn): LlamaSdpaAttention(
+          (q_proj): ActQuantWrapper(
+            Input Quantizer Bits: 8 (Asymmetric Per-Token)
+            Output Quantizer Bits: 16
+            (module): QuantizeLinear(
+              in_features=2048, out_features=2048, bias=False
+              (quantizer): WeightQuantizer()
+            )
+            (quantizer): ActQuantizer()
+            (out_quantizer): ActQuantizer()
+          )
+          (k_proj): ActQuantWrapper(
+            Input Quantizer Bits: 8 (Asymmetric Per-Token)
+            Output Quantizer Bits: 16
+            (module): QuantizeLinear(
+              in_features=2048, out_features=512, bias=False
+              (quantizer): WeightQuantizer()
+            )
+            (quantizer): ActQuantizer()
+            (out_quantizer): ActQuantizer()
+          )
+          (v_proj): ActQuantWrapper(
+            Input Quantizer Bits: 8 (Asymmetric Per-Token)
+            Output Quantizer Bits: 16
+            (module): QuantizeLinear(
+              in_features=2048, out_features=512, bias=False
+              (quantizer): WeightQuantizer()
+            )
+            (quantizer): ActQuantizer()
+            (out_quantizer): ActQuantizer()
+          )
+          (o_proj): ActQuantWrapper(
+            Input Quantizer Bits: 8 (Asymmetric Per-Token)
+            Output Quantizer Bits: 16
+            (module): QuantizeLinear(
+              in_features=2048, out_features=2048, bias=False
+              (quantizer): WeightQuantizer()
+            )
+            (quantizer): ActQuantizer()
+            (out_quantizer): ActQuantizer()
+          )
+          (rotary_emb): LlamaRotaryEmbedding()
+          (R2): RotateModule()
+        )
+        (mlp): LlamaMLP(
+          (gate_proj): ActQuantWrapper(
+            Input Quantizer Bits: 8 (Asymmetric Per-Token)
+            Output Quantizer Bits: 16
+            (module): QuantizeLinear(
+              in_features=2048, out_features=8192, bias=False
+              (quantizer): WeightQuantizer()
+            )
+            (quantizer): ActQuantizer()
+            (out_quantizer): ActQuantizer()
+          )
+          (up_proj): ActQuantWrapper(
+            Input Quantizer Bits: 8 (Asymmetric Per-Token)
+            Output Quantizer Bits: 16
+            (module): QuantizeLinear(
+              in_features=2048, out_features=8192, bias=False
+              (quantizer): WeightQuantizer()
+            )
+            (quantizer): ActQuantizer()
+            (out_quantizer): ActQuantizer()
+          )
+          (down_proj): ActQuantWrapper(
+            Input Quantizer Bits: 8 (Asymmetric Per-Token)
+            Output Quantizer Bits: 16
+            (module): QuantizeLinear(
+              in_features=8192, out_features=2048, bias=False
+              (quantizer): WeightQuantizer()
+            )
+            (quantizer): ActQuantizer()
+            (out_quantizer): ActQuantizer()
+          )
+          (act_fn): SiLU()
+        )
+        (input_layernorm): LlamaRMSNorm((2048,), eps=1e-05)
+        (post_attention_layernorm): LlamaRMSNorm((2048,), eps=1e-05)
+      )
+    )
+    (norm): LlamaRMSNorm((2048,), eps=1e-05)
+    (rotary_emb): LlamaRotaryEmbedding()
+  )
+  (lm_head): ActQuantWrapper(
+    Input Quantizer Bits: 16
+    Output Quantizer Bits: 16
+    (module): Linear(in_features=2048, out_features=128256, bias=False)
+    (quantizer): ActQuantizer()
+    (out_quantizer): ActQuantizer()
+  )
+  (R1): RotateModule()
+)
+2026-09-10 11:37:20,201 - spinquant - INFO - Start to load tokenizer...
+INFO:spinquant:Start to load tokenizer...
+The tokenizer class you load from this checkpoint is not the same type as the class this function is called from. It may result in unexpected tokenization. 
+The tokenizer class you load from this checkpoint is 'PreTrainedTokenizerFast'. 
+The class this function is called from is 'LlamaTokenizerFast'.
+You are using the default legacy behaviour of the <class 'transformers.models.llama.tokenization_llama_fast.LlamaTokenizerFast'>. This is expected, and simply means that the `legacy` (previous) behavior will be used so nothing changes for you. If you want to use the new behaviour, set `legacy=False`. This should only be set if you understand what it means, and thoroughly read the reason why this was added as explained in https://github.com/huggingface/transformers/pull/24565 - if you loaded a llama tokenizer from a GGUF file you can ignore this message.
+2026-09-10 11:37:20,628 - spinquant - INFO - Complete tokenizer loading...
+INFO:spinquant:Complete tokenizer loading...
+max_steps is given, it will override any value given in num_train_epochs
+
+  0%|          | 0/10 [00:00<?, ?it/s]/home/aiuser/spinquant-env/lib/python3.10/site-packages/torch/_dynamo/eval_frame.py:745: UserWarning: torch.utils.checkpoint: the use_reentrant parameter should be passed explicitly. In version 2.5 we will raise an exception if use_reentrant is not passed. use_reentrant=False is recommended, but if you need to preserve the current default behavior, you can pass use_reentrant=True. Refer to docs for more details on the differences between the two variants.
+  return fn(*args, **kwargs)
+
+ 10%|█         | 1/10 [01:49<16:22, 109.13s/it]
+                                               
+{'loss': 2.9096, 'grad_norm': 9.907994270324707, 'learning_rate': 1.4632923872213652, 'epoch': 0.0}
+
+ 10%|█         | 1/10 [01:49<16:22, 109.13s/it]
+ 20%|██        | 2/10 [03:36<14:26, 108.34s/it]
+                                               
+{'loss': 2.9101, 'grad_norm': 10.038128852844238, 'learning_rate': 1.3567627457812106, 'epoch': 0.0}
+
+ 20%|██        | 2/10 [03:36<14:26, 108.34s/it]
+ 30%|███       | 3/10 [05:26<12:41, 108.74s/it]
+                                               
+{'loss': 2.6385, 'grad_norm': 10.816441535949707, 'learning_rate': 1.1908389392193548, 'epoch': 0.0}
+
+ 30%|███       | 3/10 [05:26<12:41, 108.74s/it]
+ 40%|████      | 4/10 [07:13<10:50, 108.39s/it]
+                                               
+{'loss': 2.8125, 'grad_norm': 9.733308792114258, 'learning_rate': 0.9817627457812106, 'epoch': 0.0}
+
+ 40%|████      | 4/10 [07:13<10:50, 108.39s/it]
+ 50%|█████     | 5/10 [09:02<09:01, 108.27s/it]
+                                               
+{'loss': 2.5943, 'grad_norm': 9.05454158782959, 'learning_rate': 0.75, 'epoch': 0.0}
+
+ 50%|█████     | 5/10 [09:02<09:01, 108.27s/it]
+ 60%|██████    | 6/10 [10:50<07:13, 108.30s/it]
+                                               
+{'loss': 2.6725, 'grad_norm': 9.119841575622559, 'learning_rate': 0.5182372542187895, 'epoch': 0.01}
+
+ 60%|██████    | 6/10 [10:50<07:13, 108.30s/it]
+ 70%|███████   | 7/10 [12:38<05:24, 108.33s/it]
+                                               
+{'loss': 2.3737, 'grad_norm': 16.366031646728516, 'learning_rate': 0.3091610607806452, 'epoch': 0.01}
+
+ 70%|███████   | 7/10 [12:38<05:24, 108.33s/it]
+ 80%|████████  | 8/10 [14:27<03:37, 108.55s/it]
+                                               
+{'loss': 2.3594, 'grad_norm': 10.479016304016113, 'learning_rate': 0.1432372542187895, 'epoch': 0.01}
+
+ 80%|████████  | 8/10 [14:27<03:37, 108.55s/it]
+ 90%|█████████ | 9/10 [16:15<01:48, 108.38s/it]
+                                               
+{'loss': 2.382, 'grad_norm': 10.58582878112793, 'learning_rate': 0.03670761277863485, 'epoch': 0.01}
+
+ 90%|█████████ | 9/10 [16:15<01:48, 108.38s/it]
+100%|██████████| 10/10 [18:04<00:00, 108.56s/it]
+                                                
+{'loss': 2.3976, 'grad_norm': 11.037643432617188, 'learning_rate': 0.0, 'epoch': 0.01}
+
+100%|██████████| 10/10 [18:04<00:00, 108.56s/it]
+                                                
+{'train_runtime': 1084.8294, 'train_samples_per_second': 0.009, 'train_steps_per_second': 0.009, 'train_loss': 2.60501766204834, 'epoch': 0.01}
+
+100%|██████████| 10/10 [18:04<00:00, 108.56s/it]
+100%|██████████| 10/10 [18:04<00:00, 108.48s/it]
+[rank0]:[W910 11:55:35.457304535 ProcessGroupNCCL.cpp:1496] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())

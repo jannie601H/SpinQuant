@@ -17,16 +17,19 @@ from utils import fuse_norm_utils, hadamard_utils, quant_utils, utils
 def prepare_model(args, model):
     transformers.set_seed(args.seed)
     model.eval()
+    args.r3 = args.k_bits < 16 if args.r3 is None else args.r3
+    args.r4 = True if args.r4 is None else args.r4
 
     # Rotate the weights
     fuse_norm_utils.fuse_layer_norms(model)
-    apply_r3_r4.rotate_model(model, args)
+    if args.r4:
+        apply_r3_r4.rotate_model(model, args)
     utils.cleanup_memory(verbos=True)
 
     quant_utils.add_actquant(model)  # Add Activation Wrapper to the model
     qlayers = quant_utils.find_qlayers(model)
     for name in qlayers:
-        if "down_proj" in name:
+        if "down_proj" in name and args.r4:
             had_K, K = hadamard_utils.get_hadK(model.config.intermediate_size)
             qlayers[name].online_full_had = True
             qlayers[name].had_K = had_K
@@ -82,13 +85,14 @@ def prepare_model(args, model):
                 clip_ratio=layer_a_clip,
             )
 
-    if args.k_bits < 16:
+    if args.r3 or args.k_bits < 16:
         if args.k_pre_rope:
             raise NotImplementedError("Pre-RoPE quantization is not supported yet!")
         else:
             rope_function_name = "apply_rotary_pos_emb"
             layers = model.model.layers
             k_quant_config = {
+                "r3": args.r3,
                 "k_bits": args.k_bits,
                 "k_groupsize": args.k_groupsize,
                 "k_sym": not (args.k_asym),
