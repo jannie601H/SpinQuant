@@ -156,21 +156,121 @@ if 'optimize_rotation.py' in args:
         path = self.root / 'calls'
         return [a for a in map(json.loads, path.read_text().splitlines()) if stage in a] if path.exists() else []
 
-    def test_reuse_and_settings_separation(self):
-        self.run_script('on', 'off', 'off')
-        self.run_script('on', 'off', 'off', quantizer='rtn')
+    @staticmethod
+    def option(command, flag):
+        # Duplicate precision arguments could silently override the intended bit.
+        assert command.count(flag) == 1, command
+        return command[command.index(flag) + 1]
+
+    def test_gptq_protocol_and_metadata(self):
+        for a, kv in [('8', '16'), ('8', '8'), ('4', '16'), ('4', '4')]:
+            with self.subTest(a=a, kv=kv):
+                self.run_script('on', a_bits=a, k_bits=kv, v_bits=kv)
+                optimization = self.calls('optimize_rotation.py')[-1]
+                ptq = self.calls('ptq.py')[-1]
+                self.assertEqual(self.option(optimization, '--w_bits'), '16')
+                self.assertEqual(self.option(ptq, '--w_bits'), '4')
+                self.assertEqual(self.option(optimization, '--max_steps'), '10')
+                for command in (optimization, ptq):
+                    self.assertEqual(self.option(command, '--a_bits'), a)
+                    self.assertEqual(self.option(command, '--k_bits'), kv)
+                    self.assertEqual(self.option(command, '--v_bits'), kv)
+                    self.assertIn('--r3' if int(kv) < 16 else '--no-r3', command)
+                    self.assertIn('--r4', command)
+                    self.assertNotIn('--w_rtn', command)
+                self.assertIn('--rotate', ptq)
+                checkpoint = Path(self.option(ptq, '--optimized_rotation_path'))
+                self.assertTrue(checkpoint.is_file())
+                self.assertIn(f'_W16A{a}K{kv}V{kv}_steps10_', checkpoint.parent.name)
+                cached = json.loads(checkpoint.with_name('metadata.json').read_text())
+                self.assertEqual(cached['rotation_config']['rotation_w_bits'], 16)
+                self.assertNotIn('target_w_bits', cached['spec'])
+                r3_label = 'on' if int(kv) < 16 else 'off'
+                matches = list((self.root / 'results').glob(f'*_W4A{a}K{kv}V{kv}_gptq_rot-on_had-on_r3-{r3_label}_r4-on_steps10_*.metadata.json'))
+                self.assertEqual(len(matches), 1)
+                metadata = json.loads(matches[0].read_text())
+                for field, expected in dict(rotation_w_bits=16, target_w_bits=4,
+                                            a_bits=int(a), k_bits=int(kv), v_bits=int(kv),
+                                            max_steps=10, quantizer='gptq', rotation=True,
+                                            had=True, r3=int(kv) < 16, r4=True, seed=0).items():
+                    self.assertEqual(metadata[field], expected)
+                log = matches[0].with_name(matches[0].name.replace('.metadata.json', '.log')).read_text()
+                self.assertIn('target_W=4', log)
+                self.assertIn('rotation_w_bits=16 max_steps=10', log)
+
+    def test_gptq_target_weights_share_cache_but_not_results(self):
+        self.run_script('on', w_bits='4')
+        self.run_script('on', w_bits='8')
         self.assertEqual(len(self.calls('optimize_rotation.py')), 1)
+        first, second = self.calls('ptq.py')
+        self.assertEqual(self.option(first, '--optimized_rotation_path'), self.option(second, '--optimized_rotation_path'))
+        self.assertEqual(self.option(first, '--w_bits'), '4')
+        self.assertEqual(self.option(second, '--w_bits'), '8')
+        paths = list((self.root / 'results').glob('*.metadata.json'))
+        self.assertEqual({json.loads(p.read_text())['target_w_bits'] for p in paths}, {4, 8})
+
+    def test_had_switch_controls_both_stages(self):
+        for k in ('4', '8', '16'):
+            for had in ('off', 'on'):
+                with self.subTest(k=k, had=had):
+                    self.run_script('on', had, k_bits=k)
+                    r3 = had == 'on' and int(k) < 16
+                    r4 = had == 'on'
+                    for stage in ('optimize_rotation.py', 'ptq.py'):
+                        command = self.calls(stage)[-1]
+                        self.assertIn('--r3' if r3 else '--no-r3', command)
+                        self.assertIn('--r4' if r4 else '--no-r4', command)
+                        self.assertEqual(self.option(command, '--k_bits'), k)
+                    checkpoint = Path(self.option(self.calls('ptq.py')[-1], '--optimized_rotation_path'))
+                    config = json.loads(checkpoint.with_name('metadata.json').read_text())['rotation_config']
+                    self.assertEqual((config['had'], config['r3'], config['r4']), (r4, r3, r4))
+        self.assertEqual(len(self.calls('optimize_rotation.py')), 6)
+        # Omitted HAD and explicit HAD=on resolve to the same cache.
+        self.run_script('on', k_bits='16')
+        self.assertEqual(len(self.calls('optimize_rotation.py')), 6)
+        for path in (self.root / 'results').glob('*.metadata.json'):
+            metadata = json.loads(path.read_text())
+            self.assertEqual(metadata['r3'], metadata['had'] and metadata['k_bits'] < 16)
+            self.assertEqual(metadata['r4'], metadata['had'])
+            self.assertIn('_had-on_' if metadata['had'] else '_had-off_', path.name)
+
+    def test_no_rotation_gptq_and_rtn(self):
+        for quantizer, a, kv in [('gptq', '8', '16'), ('rtn', '4', '4')]:
+            self.run_script('off', quantizer=quantizer, a_bits=a, k_bits=kv, v_bits=kv)
+            self.assertEqual(len(self.calls('optimize_rotation.py')), 0)
+            command = self.calls('ptq.py')[-1]
+            self.assertEqual('--w_rtn' in command, quantizer == 'rtn')
+            self.assertNotIn('--rotate', command)
+            self.assertNotIn('--optimized_rotation_path', command)
+            self.assertIn('--no-r3', command)
+            self.assertIn('--no-r4', command)
+            for flag, expected in [('w', '4'), ('a', a), ('k', kv), ('v', kv)]:
+                self.assertEqual(self.option(command, f'--{flag}_bits'), expected)
+        for path in (self.root / 'results').glob('*.metadata.json'):
+            metadata = json.loads(path.read_text())
+            self.assertFalse(metadata['rotation'])
+            self.assertFalse(metadata['had'])
+            self.assertFalse(metadata['r3'])
+            self.assertFalse(metadata['r4'])
+            self.assertIsNone(metadata['rotation_w_bits'])
+            self.assertIsNone(metadata['max_steps'])
+
+    def test_reuse_and_settings_separation(self):
+        self.run_script('on', 'off')
+        self.run_script('on', 'off', quantizer='rtn')
+        self.assertEqual(len(self.calls('optimize_rotation.py')), 2)
+        self.assertEqual(self.option(self.calls('optimize_rotation.py')[-1], '--w_bits'), '4')
+        self.assertIn('--w_rtn', self.calls('ptq.py')[-1])
         for command in self.calls('optimize_rotation.py') + self.calls('ptq.py'):
             self.assertIn('--no-r3', command)
             self.assertIn('--no-r4', command)
-        self.run_script('on', 'off', 'off', env={'MAX_STEPS': '100'})
-        self.run_script('on', 'on', 'off')
-        self.run_script('on', 'off', 'on')
-        self.run_script('on', 'off', 'off', model='other-org/model')
-        self.run_script('on', 'off', 'off', env={'ROTATION_SEED': '1'})
+        self.run_script('on', 'off', env={'MAX_STEPS': '100'})
+        self.run_script('on', 'on')
+        self.run_script('on', 'off', model='other-org/model')
+        self.run_script('on', 'off', env={'ROTATION_SEED': '1'})
         self.assertEqual(len(self.calls('optimize_rotation.py')), 6)
         self.assertEqual(len(list((self.root / 'results/rotation').glob('*/metadata.json'))), 6)
-        self.run_script('on', 'off', 'off', env={'FORCE_ROTATION': '1'})
+        self.run_script('on', 'off', env={'FORCE_ROTATION': '1'})
         self.assertEqual(len(self.calls('optimize_rotation.py')), 7)
 
     def test_failed_training_and_corruption(self):
@@ -198,14 +298,16 @@ if 'optimize_rotation.py' in args:
         self.run_script('on', model=str(local_model))
         for setting in ('w_bits', 'a_bits', 'k_bits', 'v_bits'):
             self.run_script('on', model=str(local_model), **{setting: '16'})
-        self.assertEqual(len(self.calls('optimize_rotation.py')), 6)
+        self.assertEqual(len(self.calls('optimize_rotation.py')), 5)
 
     def test_off_and_invalid_arguments(self):
-        self.run_script('off', 'off', 'off')
+        self.run_script('off', 'off')
         self.assertEqual(len(self.calls('optimize_rotation.py')), 0)
         self.assertNotIn('--rotate', self.calls('ptq.py')[0])
         self.run_script('on', 'invalid', ok=False)
         self.run_script('on', quantizer='invalid', ok=False)
+        self.run_script('off', 'on', ok=False)
+        self.run_script('on', 'off', 'off', ok=False)  # Obsolete 9-argument interface.
         self.assertEqual(len(self.calls('optimize_rotation.py')), 0)
 
 

@@ -1,67 +1,129 @@
-# PTQ 실험과 rotation 캐시
+# GPTQ 프로토콜에 따른 PTQ 실험과 rotation 캐시
+
+프로젝트 루트에서 실행한다. `scripts/` 디렉터리에 있다면 `bash run_ptq.sh ...`를 사용한다.
 
 ```bash
-bash scripts/run_ptq.sh MODEL W_BITS A_BITS K_BITS V_BITS QUANTIZER ROTATION [R3] [R4]
+bash scripts/run_ptq.sh MODEL W_BITS A_BITS K_BITS V_BITS QUANTIZER ROTATION [HAD]
 ```
 
-- `QUANTIZER`: `gptq` 또는 `rtn` (PTQ 가중치 양자화 방식).
-- `ROTATION`: R1/R2 최적화 및 적용 여부 (`on` / `off`).
-- `R3`, `R4`: 각각 독립적으로 `on` / `off`. 최적화와 PTQ에 같은 값이 전달된다.
-- R3 생략 시 K<16이면 on, K16이면 off. R4 생략 시 ROTATION을 따른다. 기존 7개 인자 호출의 rotation 동작을 유지한다.
-- 명시적인 `R3=on`은 K16에서도 Q/K Hadamard를 실행한다. `R3=off`도 K4/K8 양자화는 유지한다.
-- R4는 down_proj 가중치 변환과 입력 activation 변환을 함께 제어한다. ROTATION=off에서도 R4를 명시적으로 켤 수 있다.
+`W_BITS`는 항상 **최종 PTQ의 target weight bit**다. 학습용 weight bit는 스크립트가 별도로 결정한다.
+
+| 최종 PTQ 설정 | Rotation optimization | 최종 PTQ |
+|---|---|---|
+| GPTQ, rotation on | W16 + target A/K/V | target W/A/K/V, GPTQ |
+| RTN, rotation on | target W/A/K/V | target W/A/K/V, RTN |
+| GPTQ, rotation off | 실행하지 않음 | target W/A/K/V, GPTQ |
+| RTN, rotation off | 실행하지 않음 | target W/A/K/V, RTN |
+
+GPTQ에서는 rotation 학습 중 weight 양자화를 생략하고 activation/KV 양자화 조건을 유지한다. 최종 `ptq.py`가 학습된 rotation을 적용한 가중치를 target bit로 GPTQ 양자화한다. RTN은 기존처럼 target weight bit로 rotation을 학습한다.
+
+## Rotation과 Had 설정
+
+- `ROTATION`: learned R1/R2 사용 여부 (`on` / `off`).
+- `HAD`: R3/R4 Hadamard 적용 여부를 함께 제어하는 8번째 선택 인자 (`on` / `off`). 생략하면 ROTATION을 따른다.
+- `HAD=on`: R4는 켜고, R3는 **K<16일 때만** 켠다. K16에서는 K 양자화가 없으므로 R3를 생략한다.
+- `HAD=off`: R3/R4 모두 끈다. K4/K8 양자화 자체는 유지한다.
+- `ROTATION=off`: No Rotation. HAD도 off여야 하며 R1/R2/R3/R4 모두 끈다. `off on`은 오류다.
+- R4는 down_proj 가중치와 입력 activation 변환을 함께 제어한다.
+
+| ROTATION | HAD | K bits | R1/R2 | R3 | R4 |
+|---|---|---|---|---|---|
+| on | on | 4/8 | on | on | on |
+| on | on | 16 | on | off | on |
+| on | off | 모두 | on | off | off |
+| off | off | 모두 | off | off | off |
+
+스크립트의 이전 `[R3] [R4]` 두 인자는 `[HAD]` 하나로 대체했다. 예전 `on off off` 호출은 `on off`로 바꾼다. 내부 Python에는 계산한 `--r3`/`--no-r3`, `--r4`/`--no-r4`를 전달하며, 직접 Python을 호출하는 저수준 옵션은 그대로 유지한다.
 
 ```bash
-# R1/R2만 사용, 10 step 최적화. 다음에 같은 명령을 실행하면 R.bin 재사용.
-bash scripts/run_ptq.sh meta-llama/Llama-3.2-1B 4 8 4 4 gptq on off off
+# 기본 Had 실험: W16A4K16V16 학습 → W4A4K16V16 GPTQ 평가.
+bash scripts/run_ptq.sh meta-llama/Llama-3.2-1B 4 4 16 16 gptq on
 
-# 같은 R.bin으로 RTN 평가 (최적화 단계는 PTQ의 GPTQ/RTN 선택과 무관).
-bash scripts/run_ptq.sh meta-llama/Llama-3.2-1B 4 8 4 4 rtn on off off
+# No-Had: R1/R2만 학습·적용.
+bash scripts/run_ptq.sh meta-llama/Llama-3.2-1B 4 4 16 16 gptq on off
 
-# 100 step 실험은 10 step 실험과 다른 캐시 사용.
-MAX_STEPS=100 bash scripts/run_ptq.sh meta-llama/Llama-3.2-1B 4 8 4 4 gptq on off off
+# Rotation 전체 OFF. 학습 없이 W4A4K4V4 RTN 평가.
+bash scripts/run_ptq.sh meta-llama/Llama-3.2-1B 4 4 4 4 rtn off
 
-# R3/R4도 사용.
-bash scripts/run_ptq.sh meta-llama/Llama-3.2-1B 4 8 4 4 gptq on on on
+# 같은 A/K/V·Had·학습 설정의 GPTQ target W8은 W4 실험의 W16 캐시 재사용.
+bash scripts/run_ptq.sh meta-llama/Llama-3.2-1B 8 4 16 16 gptq on
 
-# 동일한 캐시 설정을 강제로 다시 학습.
-FORCE_ROTATION=1 bash scripts/run_ptq.sh meta-llama/Llama-3.2-1B 4 8 4 4 gptq on off off
+# 최종 baseline용 100-step 학습은 10-step 캐시와 별도.
+MAX_STEPS=100 bash scripts/run_ptq.sh meta-llama/Llama-3.2-1B 4 4 16 16 gptq on
+
+# 유효한 캐시가 있어도 강제로 다시 학습.
+FORCE_ROTATION=1 bash scripts/run_ptq.sh meta-llama/Llama-3.2-1B 4 4 16 16 gptq on
 ```
 
-환경 변수:
+## 학습 설정과 저장 구조
 
-| 변수 | 기본값 | 용도 |
+| 환경 변수 | 기본값 | 용도 |
 |---|---|---|
 | `MAX_STEPS` | `10` | Rotation 최적화 step 수 |
 | `ROTATION_SEED` | `0` | 두 Python 실행에 전달하는 `--seed` |
-| `FORCE_ROTATION` | `0` | `1`이면 유효한 캐시가 있어도 다시 최적화 |
-| `RESULT_DIR` | `results` | PTQ 로그와 rotation 캐시 저장 루트 |
+| `FORCE_ROTATION` | `0` | `1`이면 캐시가 있어도 다시 최적화 |
+| `RESULT_DIR` | `results` | PTQ 로그/metadata와 rotation 캐시 저장 루트 |
 
-캐시는 다음 구조로 저장된다.
+학습률은 1.5, batch size는 1, sequence length는 2048이며 스크립트의 최적화 인자에서 변경할 수 있다. 기본 10-step은 pipeline 검증용이다. 100-step 실행은 처음부터 학습하며 10-step R.bin에서 resume하지 않는다. R.bin에는 R1/R2만 있고 optimizer/scheduler 상태가 없다. `max_steps`는 학습량과 cosine 학습률 스케줄에 영향을 주므로 캐시를 구분한다.
 
 ```text
-results/rotation/
-  Llama-3.2-1B_W4A8K4V4_steps10_r3-off_r4-off_<hash>/
-    R.bin
-    metadata.json
-    optimize.log
+results/
+  rotation/
+    Llama-3.2-1B_W16A4K16V16_steps10_r3-off_r4-on_<cache-hash>/
+      R.bin
+      metadata.json
+      optimize.log
+  Llama-3.2-1B_W4A4K16V16_gptq_rot-on_had-on_r3-off_r4-on_steps10_rotW16_seed-0_<run-hash>.log
+  Llama-3.2-1B_W4A4K16V16_gptq_rot-on_had-on_r3-off_r4-on_steps10_rotW16_seed-0_<run-hash>.metadata.json
 ```
 
-해시에는 전체 모델 식별자(동일 basename의 다른 모델 구분), 최적화 명령의 모든 인자, 학습 관련 Python 소스 내용, 주요 패키지 버전이 포함된다. 따라서 W/A/K/V, R3/R4, max_steps, seed, learning_rate, batch size, sequence length, clipping/group 설정 등이 달라지면 캐시가 분리된다. 로컬 모델은 절대 경로와 내부 파일의 상대 경로·크기·수정 시각도 포함한다. 파일 이름에는 자주 비교하는 설정을 표시하고, `metadata.json`에는 전체 구분 정보를 기록한다.
+- Rotation 디렉터리는 **실제 최적화 조건**을 나타낸다. GPTQ용이면 W16이다.
+- PTQ 로그/metadata 파일명은 **최종 target 조건**을 나타낸다. W4 평가이면 W4이며, rotation on/off·GPTQ/RTN·Had·실제 R3/R4·steps·학습 W·seed도 표시한다.
+- Rotation off는 학습하지 않으므로 파일명에 steps/rotW를 넣지 않는다. PTQ metadata의 `max_steps`, `rotation_w_bits`, `learning_rate`, `rotation_checkpoint`는 null이다.
+- PTQ 로그 첫 부분에도 target bit와 학습 bit, rotation/Had/실제 R3/R4, seed, 학습 step과 checkpoint 경로를 기록한다.
 
-`max_steps`는 반드시 구분한다. 학습량뿐 아니라 cosine learning-rate schedule도 바뀌므로 10-step 결과를 100-step 결과로 취급할 수 없다. 100-step 실행은 별도로 처음부터 학습하며, 10-step R.bin에서 resume하지 않는다. R.bin에는 R1/R2만 있고 optimizer/scheduler 상태가 없다.
+캐시 해시에는 전체 모델 식별자, **최적화 명령**의 모든 인자, 학습 관련 Python 소스 내용, 주요 패키지 버전이 포함된다. 캐시 디렉터리명은 실제 R3/R4 설정을 유지하므로 이전과 실행 명령이 같으면 기존 캐시를 재사용할 수 있다. 로컬 모델은 절대 경로와 내부 파일의 상대 경로·크기·수정 시각도 포함한다. A/K/V, R3/R4, max_steps, seed, learning_rate, batch size, sequence length, clipping/group 설정이 달라지면 캐시가 분리된다.
 
-학습이 성공하고 비어 있지 않은 R.bin이 생성된 뒤에만 완료 메타데이터를 게시한다. 재사용 시 설정과 파일 SHA-256을 확인한다. 같은 캐시를 요청한 동시 실행은 잠금으로 중복 학습을 방지한다. 강제 재학습이 실패하면 기존 완료 캐시는 보존한다. `optimize.log`는 가장 최근 학습 시도의 기록이다. 중간 Trainer 체크포인트 저장은 끄고 최종 R.bin을 보관한다.
+GPTQ의 target W는 캐시 키에 넣지 않는다. target W4/W8은 동일한 W16 학습 캐시를 공유하지만 PTQ 결과는 별도로 기록한다. RTN W4 최적화와 GPTQ W16 최적화는 서로 다른 캐시다. 실제 학습 명령이 완전히 같은 경우에만 GPTQ/RTN 사이에도 공유할 수 있다.
 
-기존의 메타데이터 없는 R.bin은 삭제하지 않으며 자동 재사용하지 않는다. 학습 설정과 완료 여부를 검증할 수 없기 때문이다. 원격 모델은 입력한 저장소 ID를 기준으로 구분하며 원격 revision 변경을 조회하지 않는다. 같은 ID의 원격 가중치가 바뀌었거나 로컬 파일의 크기·수정 시각을 유지한 채 내용을 바꿨다면 `FORCE_ROTATION=1`로 갱신한다.
+Rotation `metadata.json`은 기존 `spec`과 `checkpoint_sha256`을 유지하고, 읽기 쉬운 `rotation_config`를 추가한다. 이 객체에는 model, rotation_w_bits, A/K/V, rotation, had, R3/R4, max_steps, learning_rate, seed를 기록한다. 여러 target W/quantizer가 공유할 수 있으므로 특정 target을 checkpoint 자체의 조건으로 기록하지 않는다.
 
-PTQ는 캐시가 있어도 매번 실행한다. PTQ 로그는 캐시 식별자와 GPTQ/RTN·seed를 포함하며 동일 설정의 재평가 로그는 덮어쓴다. ROTATION=off에서는 rotation 학습/캐시 조회를 하지 않는다.
+대신 각 **PTQ 로그 옆의 `.metadata.json`**에 다음과 같이 해당 실험의 전체 조건을 기록한다.
 
-검증 명령:
+```json
+{
+  "model": "meta-llama/Llama-3.2-1B",
+  "rotation_w_bits": 16,
+  "target_w_bits": 4,
+  "a_bits": 4,
+  "k_bits": 16,
+  "v_bits": 16,
+  "quantizer": "gptq",
+  "rotation": true,
+  "had": true,
+  "r3": false,
+  "r4": true,
+  "max_steps": 10,
+  "learning_rate": 1.5,
+  "seed": 0
+}
+```
+
+실제 파일에는 checkpoint 경로·SHA-256 및 최종 실행 명령도 포함한다. 이 metadata는 실행 직전에 작성하는 **실험 설정 기록**이며 평가 성공을 보장하는 표시는 아니다. PPL과 실패 여부는 로그에서 확인한다. 동일 설정과 checkpoint의 재평가 로그/metadata는 덮어쓴다.
+
+## 캐시 검증과 기존 결과
+
+학습 성공 및 비어 있지 않은 R.bin 생성 후에만 완료 메타데이터를 게시한다. 재사용 시 설정과 파일 SHA-256을 확인한다. 동시 실행은 잠금으로 동일 캐시의 중복 학습을 방지한다. 강제 재학습 실패 시 기존 완료 캐시는 보존하며 `optimize.log`는 가장 최근 학습 시도를 기록한다. 중간 Trainer 체크포인트 저장은 끄고 최종 R.bin을 보관한다.
+
+기존 파일은 삭제하지 않는다. 메타데이터 없는 R.bin은 자동 재사용하지 않으며, 기존 W4 학습 캐시는 새 GPTQ W16 학습 요청과 일치하지 않으므로 사용하지 않는다. 원격 revision 변경은 조회하지 않는다. 같은 원격 ID의 가중치가 바뀌었거나 로컬 파일의 크기·수정 시각을 유지한 채 내용을 바꿨다면 `FORCE_ROTATION=1`로 갱신한다.
+
+이전에 rotation optimization에서도 target W4를 사용한 GPTQ 결과는 pipeline 검증 기록으로 보관한다. 논문 GPTQ baseline과 직접 비교하는 결과로 사용하지 않으며, 새 W16 최적화 조건으로 다시 측정한다. 현재 10-step 결과 역시 최종 100-step baseline과 구분한다.
+
+## 검증
 
 ```bash
 bash -n scripts/run_ptq.sh
 python -m unittest discover -s tests -v
 ```
 
-테스트는 가짜 torchrun으로 캐시 생명주기를 확인하고, CPU Hadamard 대체 연산으로 rotation 분기와 K 양자화를 검증한다. 실제 GPU 학습·CUDA 커널·전체 모델 perplexity 검증은 포함하지 않는다.
+가짜 torchrun으로 GPTQ 학습 W16/평가 target W 분리, A/K/V 유지, RTN 분기, No Rotation, 파일명/metadata, 캐시 공유·분리·실패 복구를 검증한다. Had on/off와 K4/K8/K16의 조합을 확인하고, CPU Hadamard 대체 연산으로 R3/R4 분기와 K 양자화도 확인한다. 실제 GPU 학습·CUDA 커널·전체 모델 perplexity 검증은 포함하지 않는다.
