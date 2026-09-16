@@ -17,6 +17,7 @@ import tqdm
 from utils import monkeypatch, quant_utils, utils
 from utils.hadamard_utils import (
     apply_exact_had_to_linear,
+    hadamard_matrix,
     is_pow2,
     random_hadamard_matrix,
 )
@@ -118,34 +119,66 @@ def rotate_ov_proj(layer, head_num, head_dim, R2=None):
 
     apply_exact_had_to_linear(v_proj, had_dim=head_dim, output=True, R2=R2)
     apply_exact_had_to_linear(o_proj, had_dim=head_dim, output=False, R2=R2)
+    if v_proj.bias is not None:
+        rotation = R2 if R2 is not None else hadamard_matrix(head_dim, v_proj.bias.device)
+        bias = v_proj.bias.data
+        v_proj.bias.data = (
+            bias.reshape(-1, head_dim).double() @ rotation.to(device=bias.device, dtype=torch.float64)
+        ).reshape_as(bias).to(bias.dtype)
 
 
-@torch.inference_mode()
+@torch.no_grad()
 def rotate_model(model, args):
-    R1 = get_orthogonal_matrix(model.config.hidden_size, args.rotate_mode)
-    if args.optimized_rotation_path is not None:
-        R_cpk = args.optimized_rotation_path
-        R1 = torch.load(R_cpk)["R1"].cuda().to(torch.float64)
+    checkpoint = (
+        torch.load(args.optimized_rotation_path, map_location="cpu", weights_only=True)
+        if args.optimized_rotation_path is not None else None
+    )
+    respin = getattr(args, "respin", False) or (checkpoint is not None and "A.0" in checkpoint)
+    if respin and getattr(args, "export_to_et", False):
+        raise ValueError("ExecuTorch export does not support Respin residual rotations.")
     config = model.config
     num_heads = config.num_attention_heads
     model_dim = config.hidden_size
-    head_dim = model_dim // num_heads
+    head_dim = getattr(config, "head_dim", model_dim // num_heads)
+    num_layers = len(model.model.layers)
 
-    rotate_embeddings(model, R1)
-    rotate_head(model, R1)
+    if checkpoint is not None:
+        sizes = {f"model.layers.{i}.self_attn.R2": head_dim for i in range(num_layers)}
+        if respin:
+            sizes.update({f"A.{i}": model_dim for i in range(num_layers + 1)})
+            sizes.update({f"B.{i}": model_dim for i in range(num_layers)})
+        else:
+            sizes["R1"] = model_dim
+        for key, size in sizes.items():
+            if key not in checkpoint or checkpoint[key].shape != (size, size):
+                raise ValueError(f"Rotation checkpoint requires {key} with shape {(size, size)}.")
+
+    def rotation(key, size):
+        if checkpoint is not None:
+            return checkpoint[key].to(device="cuda", dtype=torch.float64)
+        return get_orthogonal_matrix(size, args.rotate_mode)
+
+    config.respin = respin
+    A = rotation("A.0" if respin else "R1", model_dim)
+
+    rotate_embeddings(model, A)
     utils.cleanup_memory()
     layers = [layer for layer in model.model.layers]
     for idx, layer in enumerate(tqdm.tqdm(layers, unit="layer", desc="Rotating")):
-        if args.optimized_rotation_path is not None:
-            key = f"model.layers.{idx}.self_attn.R2"
-            R2 = torch.load(R_cpk)[key].cuda().to(torch.float64)
-        else:
-            R2 = get_orthogonal_matrix(head_dim, args.rotate_mode)
-        rotate_attention_inputs(layers[idx], R1)
-        rotate_attention_output(layers[idx], R1)
-        rotate_mlp_input(layers[idx], R1)
-        rotate_mlp_output(layers[idx], R1, r4=args.r4)
-        rotate_ov_proj(layers[idx], num_heads, head_dim, R2=R2)
+        B = rotation(f"B.{idx}", model_dim) if respin else A
+        A_next = rotation(f"A.{idx + 1}", model_dim) if respin else A
+        R2 = rotation(f"model.layers.{idx}.self_attn.R2", head_dim)
+        rotate_attention_inputs(layer, A)
+        rotate_attention_output(layer, B)
+        rotate_mlp_input(layer, B)
+        rotate_mlp_output(layer, A_next, r4=args.r4)
+        rotate_ov_proj(layer, num_heads, head_dim, R2=R2)
+        if respin:
+            dtype = layer.self_attn.q_proj.weight.dtype
+            layer.attn_residual_rotation = (A.T @ B).to(device="cpu", dtype=dtype)
+            layer.mlp_residual_rotation = (B.T @ A_next).to(device="cpu", dtype=dtype)
+        A = A_next
+    rotate_head(model, A)
 
 
 class QKRotationWrapper(torch.nn.Module):

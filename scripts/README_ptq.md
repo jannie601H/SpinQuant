@@ -2,6 +2,14 @@
 
 프로젝트 루트에서 실행한다. `scripts/` 디렉터리에 있다면 `bash run_ptq.sh ...`를 사용한다.
 
+PyTorch가 설치된 가상환경을 활성화하거나 `PYTHON_BIN`으로 해당 Python 경로를 지정한다. 스크립트는 기본적으로 `python3`를 사용하며, 캐시 처리와 학습·평가 모두 같은 Python으로 실행한다 (`python -m torch.distributed.run`).
+
+```bash
+PYTHON_BIN="$HOME/spinquant-env/bin/python" RESPIN=1 bash scripts/run_ptq.sh meta-llama/Llama-3.2-1B 4 8 16 16 gptq on
+```
+
+`MODEL`에는 전체 Hugging Face ID (`meta-llama/Llama-3.2-1B`) 또는 `config.json`과 가중치가 있는 로컬 디렉터리 경로를 지정한다. `Llama-3.2-1B`라는 로컬 폴더가 없다면 짧은 모델 이름만으로는 불러올 수 없다.
+
 ```bash
 bash scripts/run_ptq.sh MODEL W_BITS A_BITS K_BITS V_BITS QUANTIZER ROTATION [HAD]
 ```
@@ -19,6 +27,7 @@ GPTQ에서는 rotation 학습 중 weight 양자화를 생략하고 activation/KV
 
 ## Rotation과 Had 설정
 
+- `RESPIN=1` 환경 변수를 지정하면 전역 R1 대신 층별 A/B를 학습한다. `ROTATION=on`이 필요하며 R2/R3/R4 설정은 동일하게 적용된다.
 - `ROTATION`: learned R1/R2 사용 여부 (`on` / `off`).
 - `HAD`: R3/R4 Hadamard 적용 여부를 함께 제어하는 8번째 선택 인자 (`on` / `off`). 생략하면 ROTATION을 따른다.
 - `HAD=on`: R4는 켜고, R3는 **K<16일 때만** 켠다. K16에서는 K 양자화가 없으므로 R3를 생략한다.
@@ -38,6 +47,9 @@ GPTQ에서는 rotation 학습 중 weight 양자화를 생략하고 activation/KV
 ```bash
 # 기본 Had 실험: W16A4K16V16 학습 → W4A4K16V16 GPTQ 평가.
 bash scripts/run_ptq.sh meta-llama/Llama-3.2-1B 4 4 16 16 gptq on
+
+# Respin: 층별 attention/MLP 좌표계와 residual 변환을 함께 학습·적용.
+RESPIN=1 bash scripts/run_ptq.sh meta-llama/Llama-3.2-1B 4 4 16 16 gptq on
 
 # No-Had: R1/R2만 학습·적용.
 bash scripts/run_ptq.sh meta-llama/Llama-3.2-1B 4 4 16 16 gptq on off
@@ -59,12 +71,16 @@ FORCE_ROTATION=1 bash scripts/run_ptq.sh meta-llama/Llama-3.2-1B 4 4 16 16 gptq 
 
 | 환경 변수 | 기본값 | 용도 |
 |---|---|---|
+| `PYTHON_BIN` | `python3` | PyTorch가 설치된 Python 실행 파일 |
+| `RESPIN` | `0` | `1`이면 전역 R1 대신 층별 A/B 사용 |
 | `MAX_STEPS` | `10` | Rotation 최적화 step 수 |
 | `ROTATION_SEED` | `0` | 두 Python 실행에 전달하는 `--seed` |
 | `FORCE_ROTATION` | `0` | `1`이면 캐시가 있어도 다시 최적화 |
 | `RESULT_DIR` | `results` | PTQ 로그/metadata와 rotation 캐시 저장 루트 |
 
-학습률은 1.5, batch size는 1, sequence length는 2048이며 스크립트의 최적화 인자에서 변경할 수 있다. 기본 10-step은 pipeline 검증용이다. 100-step 실행은 처음부터 학습하며 10-step R.bin에서 resume하지 않는다. R.bin에는 R1/R2만 있고 optimizer/scheduler 상태가 없다. `max_steps`는 학습량과 cosine 학습률 스케줄에 영향을 주므로 캐시를 구분한다.
+학습률은 1.5, batch size는 1, sequence length는 2048이며 스크립트의 최적화 인자에서 변경할 수 있다. 기본 10-step은 pipeline 검증용이다. 100-step 실행은 처음부터 학습하며 10-step R.bin에서 resume하지 않는다. R.bin에는 R1/R2 (Respin에서는 A/B/R2)가 있고 optimizer/scheduler 상태가 없다. `max_steps`는 학습량과 cosine 학습률 스케줄에 영향을 주므로 캐시를 구분한다.
+
+Respin은 `A.0`부터 `A.N`까지 N+1개, `B.0`부터 `B.(N-1)`까지 N개의 행렬을 저장한다. PyTorch weight 기준으로 Q/K/V는 `W @ Ai`, o_proj는 `Bi.T @ W`, gate/up은 `W @ Bi`, down은 `A(i+1).T @ W`로 변환한다. 첫 embedding에는 `A0`, 마지막 head에는 `AN`을 fuse한다. PTQ 모델의 두 residual buffer에는 `Ai.T @ Bi`, `Bi.T @ A(i+1)`을 저장한다. 학습 중에는 이 곱을 매 forward에서 계산해 A/B gradient를 유지한다. 저수준 실행에서는 `optimize_rotation.py --respin`, `ptq.py --rotate --respin`을 사용한다. 기존 R1/R2 checkpoint도 계속 지원한다. Respin residual을 지원하지 않는 ExecuTorch export는 오류로 중단한다.
 
 ```text
 results/

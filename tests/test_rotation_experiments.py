@@ -1,7 +1,9 @@
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -123,7 +125,7 @@ class ScriptCacheTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         fake = self.root / 'torchrun'
-        fake.write_text('''#!/usr/bin/env python
+        fake.write_text(f'#!{sys.executable}\n' + '''
 import json, os, pathlib, sys
 args = sys.argv[1:]
 with open(os.environ['CALLS'], 'a') as f:
@@ -136,7 +138,17 @@ if 'optimize_rotation.py' in args:
         sys.exit(1)
 ''')
         fake.chmod(0o755)
+        python_runner = self.root / 'python-runner'
+        python_runner.write_text(
+            f'#!{sys.executable}\n'
+            'import os, sys\n'
+            'if sys.argv[1:3] == ["-m", "torch.distributed.run"]:\n'
+            f'    os.execv({str(fake)!r}, [{str(fake)!r}, *sys.argv[3:]])\n'
+            f'os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])\n'
+        )
+        python_runner.chmod(0o755)
         self.env = dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ['PATH'],
+                        PYTHON_BIN=str(python_runner),
                         RESULT_DIR=str(self.root / 'results'), CALLS=str(self.root / 'calls'),
                         MAX_STEPS='10', ROTATION_SEED='0', FORCE_ROTATION='0')
 
@@ -208,6 +220,36 @@ if 'optimize_rotation.py' in args:
         self.assertEqual(self.option(second, '--w_bits'), '8')
         paths = list((self.root / 'results').glob('*.metadata.json'))
         self.assertEqual({json.loads(p.read_text())['target_w_bits'] for p in paths}, {4, 8})
+
+    def test_respin_pipeline_and_separate_cache(self):
+        self.run_script('on')
+        self.run_script('on', env={'RESPIN': '1'})
+        self.run_script('on', env={'RESPIN': '1'})
+        self.assertEqual(len(self.calls('optimize_rotation.py')), 2)
+        for stage in ('optimize_rotation.py', 'ptq.py'):
+            self.assertNotIn('--respin', self.calls(stage)[0])
+            self.assertIn('--respin', self.calls(stage)[-1])
+        first, second, third = self.calls('ptq.py')
+        self.assertNotEqual(self.option(first, '--optimized_rotation_path'), self.option(second, '--optimized_rotation_path'))
+        self.assertEqual(self.option(second, '--optimized_rotation_path'), self.option(third, '--optimized_rotation_path'))
+        path = Path(self.option(second, '--optimized_rotation_path'))
+        self.assertTrue(json.loads(path.with_name('metadata.json').read_text())['rotation_config']['respin'])
+        self.run_script('off', env={'RESPIN': '1'}, ok=False)
+
+    def test_missing_python_reports_environment_fix(self):
+        result = self.run_script('on', env={'PYTHON_BIN': str(self.root / 'missing-python')}, ok=False)
+        self.assertIn('Set PYTHON_BIN', result.stderr)
+        self.assertEqual(self.calls('optimize_rotation.py'), [])
+
+    def test_python3_default_without_python_command(self):
+        bin_dir = self.root / 'bin'
+        bin_dir.mkdir()
+        for command in ('bash', 'dirname', 'mkdir', 'tee'):
+            (bin_dir / command).symlink_to(shutil.which(command))
+        (bin_dir / 'python3').symlink_to(self.root / 'python-runner')
+        self.run_script('on', env={'PATH': str(bin_dir), 'PYTHON_BIN': ''})
+        self.assertEqual(len(self.calls('optimize_rotation.py')), 1)
+        self.assertEqual(len(self.calls('ptq.py')), 1)
 
     def test_had_switch_controls_both_stages(self):
         for k in ('4', '8', '16'):

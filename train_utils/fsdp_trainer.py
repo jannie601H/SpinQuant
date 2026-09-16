@@ -561,7 +561,8 @@ class FSDPTrainer(Trainer):
                 )
             )
         # Do not wrap rotation matrix
-        self.accelerator.state.fsdp_plugin.ignored_modules = [model.R1] + [
+        rotations = [model.A, model.B] if model.A is not None else [model.R1]
+        self.accelerator.state.fsdp_plugin.ignored_modules = rotations + [
             layer.self_attn.R2 for layer in model.model.layers
         ]
         # use_orig_params because part of the model is freezed

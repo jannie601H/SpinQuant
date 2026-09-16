@@ -8,7 +8,7 @@ cd "$REPO_ROOT"
 if [ "$#" -lt 7 ] || [ "$#" -gt 8 ]; then
     echo "Usage: $0 MODEL W_BITS A_BITS K_BITS V_BITS {gptq|rtn} ROTATION [HAD]" >&2
     echo "HAD defaults to ROTATION. HAD=on enables R4 and enables R3 only for K<16." >&2
-    echo "Environment: MAX_STEPS=10, ROTATION_SEED=0, FORCE_ROTATION=0, RESULT_DIR=results" >&2
+    echo "Environment: PYTHON_BIN=python3, RESPIN=0, MAX_STEPS=10, ROTATION_SEED=0, FORCE_ROTATION=0, RESULT_DIR=results" >&2
     exit 1
 fi
 
@@ -23,6 +23,8 @@ MAX_STEPS=${MAX_STEPS:-10}
 ROTATION_SEED=${ROTATION_SEED:-0}
 FORCE_ROTATION=${FORCE_ROTATION:-0}
 RESULT_DIR=${RESULT_DIR:-results}
+RESPIN=${RESPIN:-0}
+PYTHON_BIN=${PYTHON_BIN:-python3}
 
 for bits in "$W_BITS" "$A_BITS" "$K_BITS" "$V_BITS"; do
     if ! [[ "$bits" =~ ^([1-9]|1[0-6])$ ]]; then
@@ -42,6 +44,14 @@ if [[ "$FORCE_ROTATION" != 0 && "$FORCE_ROTATION" != 1 ]]; then
     echo "ERROR: FORCE_ROTATION must be 0 or 1" >&2
     exit 1
 fi
+if [[ "$RESPIN" != 0 && "$RESPIN" != 1 ]]; then
+    echo "ERROR: RESPIN must be 0 or 1" >&2
+    exit 1
+fi
+if [[ "$RESPIN" = 1 && "$ROTATION" != on ]]; then
+    echo "ERROR: RESPIN=1 requires ROTATION=on" >&2
+    exit 1
+fi
 
 # No Rotation disables all rotations; HAD controls the online Hadamard pair.
 HAD=${8:-$ROTATION}
@@ -55,6 +65,14 @@ if [[ "$ROTATION" = off && "$HAD" = on ]]; then
     echo "ERROR: No Rotation requires HAD=off" >&2
     exit 1
 fi
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    echo "ERROR: Python not found: $PYTHON_BIN. Set PYTHON_BIN to your environment's Python executable." >&2
+    exit 1
+fi
+if ! "$PYTHON_BIN" -c 'import torch.distributed.run' >/dev/null 2>&1; then
+    echo "ERROR: $PYTHON_BIN cannot import torch.distributed.run. Activate the training environment or set PYTHON_BIN to its Python executable." >&2
+    exit 1
+fi
 R3=off
 R4=$HAD
 if [[ "$HAD" = on && "$K_BITS" -lt 16 ]]; then R3=on; fi
@@ -64,6 +82,7 @@ else
     ROT_W_BITS=$W_BITS
 fi
 ROT_FLAGS=()
+if [ "$RESPIN" = 1 ]; then ROT_FLAGS+=(--respin); fi
 if [ "$R3" = on ]; then ROT_FLAGS+=(--r3); else ROT_FLAGS+=(--no-r3); fi
 if [ "$R4" = on ]; then ROT_FLAGS+=(--r4); else ROT_FLAGS+=(--no-r4); fi
 
@@ -89,15 +108,17 @@ COMMON_ARGS=(
 
 mkdir -p "$RESULT_DIR"
 echo "Model      : $MODEL"
+echo "Python     : $PYTHON_BIN"
 echo "Target W/A/K/V : $W_BITS / $A_BITS / $K_BITS / $V_BITS"
 echo "Quantizer  : $QUANTIZER"
 echo "R1/R2      : $ROTATION"
+echo "Respin A/B : $RESPIN"
 echo "Had        : $HAD"
 echo "R3 / R4    : $R3 / $R4"
 echo "Max steps  : $MAX_STEPS"
 echo "Seed       : $ROTATION_SEED"
 
-CMD=(torchrun --nnodes=1 --nproc_per_node=1 ptq.py
+CMD=("$PYTHON_BIN" -m torch.distributed.run --nnodes=1 --nproc_per_node=1 ptq.py
     "${COMMON_ARGS[@]}"
     --w_bits "$W_BITS"
     --do_train False --do_eval True --per_device_eval_batch_size 1)
@@ -107,12 +128,12 @@ if [ "$ROTATION" = on ]; then
     echo "Rotation optimization W/A/K/V : $ROT_W_BITS / $A_BITS / $K_BITS / $V_BITS"
     # max_steps affects both training length and the cosine LR schedule.
     # The helper fingerprints all training arguments, source and package versions.
-    OPT_CMD=(torchrun --nnodes=1 --nproc_per_node=1 optimize_rotation.py
+    OPT_CMD=("$PYTHON_BIN" -m torch.distributed.run --nnodes=1 --nproc_per_node=1 optimize_rotation.py
         "${COMMON_ARGS[@]}"
         --w_bits "$ROT_W_BITS"
         --per_device_train_batch_size 1
         --max_steps "$MAX_STEPS"
-        --learning_rate 1.5
+        --learning_rate 15
         --weight_decay 0.0
         --lr_scheduler_type cosine
         --gradient_checkpointing True
@@ -121,17 +142,17 @@ if [ "$ROTATION" = on ]; then
         --save_strategy no)
     CACHE_ARGS=(--cache-root "$RESULT_DIR/rotation")
     if [ "$FORCE_ROTATION" = 1 ]; then CACHE_ARGS+=(--force); fi
-    ROT_PATH=$(python "$SCRIPT_DIR/rotation_cache.py" "${CACHE_ARGS[@]}" -- "${OPT_CMD[@]}")
+    ROT_PATH=$("$PYTHON_BIN" "$SCRIPT_DIR/rotation_cache.py" "${CACHE_ARGS[@]}" -- "${OPT_CMD[@]}")
     CMD+=(--rotate --optimized_rotation_path "$ROT_PATH")
 fi
 
 # Final results describe target precision, independently of the rotation cache.
-LOG_PATH=$(python "$SCRIPT_DIR/rotation_cache.py" --ptq-result-dir "$RESULT_DIR" -- "${CMD[@]}")
+LOG_PATH=$("$PYTHON_BIN" "$SCRIPT_DIR/rotation_cache.py" --ptq-result-dir "$RESULT_DIR" -- "${CMD[@]}")
 echo "Log file   : $LOG_PATH"
 echo "Running PTQ evaluation..."
 {
     echo "Model=$MODEL target_W=$W_BITS A=$A_BITS K=$K_BITS V=$V_BITS quantizer=$QUANTIZER"
-    echo "rotation=$ROTATION had=$HAD r3=$R3 r4=$R4 seed=$ROTATION_SEED"
+    echo "rotation=$ROTATION respin=$RESPIN had=$HAD r3=$R3 r4=$R4 seed=$ROTATION_SEED"
     if [ "$ROTATION" = on ]; then
         echo "rotation_w_bits=$ROT_W_BITS max_steps=$MAX_STEPS checkpoint=$ROT_PATH"
     else

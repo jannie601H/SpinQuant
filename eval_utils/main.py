@@ -20,6 +20,8 @@ from utils.convert_to_executorch import (
 
 
 def ptq_model(args, model, model_args=None):
+    if getattr(args, "respin", False) and not args.rotate:
+        raise ValueError("--respin requires --rotate during PTQ.")
     transformers.set_seed(args.seed)
     model.eval()
     args.r3 = args.k_bits < 16 if args.r3 is None else args.r3
@@ -56,7 +58,9 @@ def ptq_model(args, model, model_args=None):
                 not args.save_qmodel_path
             ), "Cannot save a quantized model if it is already loaded!"
             print("Load quantized model from ", args.load_qmodel_path)
-            save_dict = torch.load(args.load_qmodel_path)
+            # Older checkpoints include this project's quantizer modules as metadata.
+            with torch.serialization.safe_globals([quant_utils.WeightQuantizer]):
+                save_dict = torch.load(args.load_qmodel_path, weights_only=True)
             model.load_state_dict(save_dict["model"])
 
         elif not args.w_rtn:  # GPTQ Weight Quantization

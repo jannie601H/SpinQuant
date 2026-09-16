@@ -53,6 +53,10 @@ def parser_gen():
 
     # Rotation Arguments
     parser.add_argument(
+        "--respin", action=argparse.BooleanOptionalAction, default=False,
+        help="Use layer-wise A/B rotations instead of global R1. PTQ also requires --rotate.",
+    )
+    parser.add_argument(
         "--rotate",
         action=argparse.BooleanOptionalAction,
         default=False,

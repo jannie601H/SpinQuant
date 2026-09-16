@@ -35,6 +35,7 @@ def rotation_config(command):
         "rotation_w_bits": int(option(command, "--w_bits")),
         **{f"{name}_bits": int(option(command, f"--{name}_bits")) for name in "akv"},
         "rotation": True,
+        "respin": "--respin" in command,
         "had": "--r3" in command or "--r4" in command,
         "r3": "--r3" in command,
         "r4": "--r4" in command,
@@ -85,6 +86,8 @@ def cache_label(command):
     r3 = "off" if "--no-r3" in command else "on"
     r4 = "off" if "--no-r4" in command else "on"
     label = f"{model}_{bits}_steps{value('--max_steps')}_r3-{r3}_r4-{r4}"
+    if "--respin" in command:
+        label += "_respin"
     return re.sub(r"[^A-Za-z0-9_.-]", "_", label)[:160]
 
 
@@ -166,6 +169,7 @@ def write_ptq_metadata(result_dir, command):
         **{f"{name}_bits": int(option(command, f"--{name}_bits")) for name in "akv"},
         "quantizer": "rtn" if "--w_rtn" in command else "gptq",
         "rotation": "--rotate" in command,
+        "respin": "--respin" in command,
         "had": "--r3" in command or "--r4" in command,
         "r3": "--r3" in command,
         "r4": "--r4" in command,
@@ -188,6 +192,8 @@ def write_ptq_metadata(result_dir, command):
              f"_had-{switch('had')}_r3-{switch('r3')}_r4-{switch('r4')}")
     if training:
         label += f"_steps{metadata['max_steps']}_rotW{metadata['rotation_w_bits']}"
+    if metadata["respin"]:
+        label += "_respin"
     label += f"_seed-{metadata['seed']}_{key}"
     directory = Path(result_dir).resolve()
     directory.mkdir(parents=True, exist_ok=True)

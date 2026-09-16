@@ -484,7 +484,11 @@ class LlamaAttention(nn.Module):
             cos, sin = self.rotary_emb(value_states, position_ids)
         else:
             cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(
+        # SDPA's eager fallback must retain the installed R3/K-cache transform.
+        rotary_fn = getattr(
+            self, "apply_rotary_pos_emb_qk_rotation_wrapper", apply_rotary_pos_emb
+        )
+        query_states, key_states = rotary_fn(
             query_states, key_states, cos, sin
         )
 
@@ -800,6 +804,11 @@ class LlamaDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
+        # Persist the fused changes of basis alongside the quantized weights.
+        for name in ("attn_residual_rotation", "mlp_residual_rotation"):
+            self.register_buffer(
+                name, torch.eye(self.hidden_size) if getattr(config, "respin", False) else None
+            )
 
         self.self_attn = LLAMA_ATTENTION_CLASSES[config._attn_implementation](
             config=config, layer_idx=layer_idx
@@ -850,6 +859,8 @@ class LlamaDecoderLayer(nn.Module):
                 into the model
         """
         residual = hidden_states
+        if self.attn_residual_rotation is not None:
+            residual = residual @ self.attn_residual_rotation.to(residual)
 
         hidden_states = self.input_layernorm(hidden_states)
 
@@ -869,6 +880,8 @@ class LlamaDecoderLayer(nn.Module):
 
         # Fully Connected
         residual = hidden_states
+        if self.mlp_residual_rotation is not None:
+            residual = residual @ self.mlp_residual_rotation.to(residual)
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states

@@ -40,7 +40,15 @@ class RotateModule(nn.Module):
 
 
 def train() -> None:
-    dist.init_process_group(backend="nccl", timeout=datetime.timedelta(hours=8))
+    try:
+        dist.init_process_group(backend="nccl", timeout=datetime.timedelta(hours=8))
+        _train()
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def _train() -> None:
     model_args, training_args, ptq_args = process_args_ptq()
     local_rank = get_local_rank()
 
@@ -70,7 +78,16 @@ def train() -> None:
     for param in model.parameters():
         param.requires_grad = False
     R1 = random_hadamard_matrix(model.config.hidden_size, "cuda")
-    model.R1 = RotateModule(R1)
+    if ptq_args.respin:
+        # Start from the SpinQuant basis, then optimize each boundary independently.
+        model.A = nn.ModuleList([
+            RotateModule(R1.clone()) for _ in range(model.config.num_hidden_layers + 1)
+        ])
+        model.B = nn.ModuleList([
+            RotateModule(R1.clone()) for _ in range(model.config.num_hidden_layers)
+        ])
+    else:
+        model.R1 = RotateModule(R1)
     for i in range(model.config.num_hidden_layers):
         # Each head dim = 128 for Llama model
         R2 = random_hadamard_matrix(
@@ -101,7 +118,10 @@ def train() -> None:
         block_size=min(training_args.model_max_length, 2048),
     )
 
-    trainable_parameters = [model.R1.weight] + [
+    trainable_parameters = (
+        list(model.A.parameters()) + list(model.B.parameters())
+        if ptq_args.respin else [model.R1.weight]
+    ) + [
         model.model.layers[i].self_attn.R2.weight
         for i in range(model.config.num_hidden_layers)
     ]
@@ -132,7 +152,7 @@ def train() -> None:
     R_dict = {
         key.replace(".weight", ""): value
         for key, value in cpu_state.items()
-        if "R1.weight" in key or "self_attn.R2" in key
+        if "R1.weight" in key or "self_attn.R2" in key or key.startswith(("A.", "B."))
     }
     if local_rank == 0:
         os.makedirs(model_args.output_rotation_path, exist_ok=True)

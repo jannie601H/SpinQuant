@@ -284,7 +284,7 @@ class ActQuantWrapper(torch.nn.Module):
             self.quantizer.find_params(x)
             x = self.quantizer(x).to(x_dtype)
             self.quantizer.free()
-        if R1 is not None:
+        if R1 is not None or R2 is not None:
             x = self.module(x, R1, R2, transpose).to(x_dtype)
         else:
             x = self.module(x).to(x_dtype)
