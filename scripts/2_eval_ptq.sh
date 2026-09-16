@@ -24,8 +24,8 @@ torchrun --nnodes=1 --nproc_per_node=1 ptq.py \
 --a_asym \
 --k_asym \
 --v_asym \
---k_groupsize 128 \
---v_groupsize 128 \
+--k_groupsize 64 \
+--v_groupsize 64 \
 --rotate \
---optimized_rotation_path "your_path/R.bin" \
+--optimized_rotation_path "results/output_rotation/R.bin" \
 
