@@ -8,6 +8,7 @@
 import datetime
 import os
 from logging import Logger
+import re
 
 import datasets
 import torch
@@ -70,7 +71,19 @@ def train() -> None:
     for param in model.parameters():
         param.requires_grad = False
     R1 = random_hadamard_matrix(model.config.hidden_size, "cuda")
-    model.R1 = RotateModule(R1)
+
+    ## if layerwise is true, we will use layer-wise A/B rotations instead of global R1
+    if ptq_args.layerwise:
+        # A need 1 more than the number of layers, since the last layer does not have next A
+        model.A = nn.ModuleList([
+            RotateModule(R1.clone()) for _ in range(model.config.num_hidden_layers + 1)
+        ])
+        model.B = nn.ModuleList([
+            RotateModule(R1.clone()) for _ in range(model.config.num_hidden_layers)
+        ])
+    else:
+        model.R1 = RotateModule(R1)
+
     for i in range(model.config.num_hidden_layers):
         # Each head dim = 128 for Llama model
         R2 = random_hadamard_matrix(
@@ -101,10 +114,15 @@ def train() -> None:
         block_size=min(training_args.model_max_length, 2048),
     )
 
-    trainable_parameters = [model.R1.weight] + [
+    # if ptq_args.layerwise is true, layer-wise A/B rotations will be trained
+    trainable_parameters = (
+        list(model.A.parameters()) + list(model.B.parameters())
+        if ptq_args.layerwise else [model.R1.weight]
+    ) + [
         model.model.layers[i].self_attn.R2.weight
         for i in range(model.config.num_hidden_layers)
     ]
+
     model.seqlen = training_args.model_max_length
     optimizer = SGDG(trainable_parameters, lr=training_args.learning_rate, stiefel=True)
     MyTrainer = Trainer
@@ -129,10 +147,15 @@ def train() -> None:
     else:
         cpu_state = trainer.model.state_dict()
 
+    # save only the rotation matrices from the model state dict (R1, R2, A, B)
     R_dict = {
         key.replace(".weight", ""): value
         for key, value in cpu_state.items()
-        if "R1.weight" in key or "self_attn.R2" in key
+        if (
+            "R1.weight" in key
+            or "self_attn.R2" in key
+            or re.search(r"(?:^|\.)[AB]\.\d+\.weight$", key)
+        )
     }
     if local_rank == 0:
         os.makedirs(model_args.output_rotation_path, exist_ok=True)
@@ -145,4 +168,8 @@ def train() -> None:
 
 
 if __name__ == "__main__":
-    train()
+    try:
+        train()
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()

@@ -63,6 +63,15 @@ def parser_gen():
     parser.add_argument(
         "--rotate_mode", type=str, default="hadamard", choices=["hadamard", "random"]
     )
+
+    ## resipin argument
+    parser.add_argument(
+        "--layerwise", 
+        action=argparse.BooleanOptionalAction, 
+        default=False, 
+        help="Use layer-wise A/B rotations instead of global R1.",
+    )
+    
     parser.add_argument(
         "--rotation_seed",
         type=int,

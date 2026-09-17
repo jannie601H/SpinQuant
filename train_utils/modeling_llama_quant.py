@@ -325,7 +325,7 @@ class LlamaMLP(nn.Module):
         )
         self.act_fn = ACT2FN[config.hidden_act]
 
-    def forward(self, x, R1):
+    def forward(self, x, R1=None, B=None, A_next=None):
         # if self.config.pretraining_tp > 1:
         #     slice = self.intermediate_size // self.config.pretraining_tp
         #     gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
@@ -343,9 +343,11 @@ class LlamaMLP(nn.Module):
         #     ]
         #     down_proj = sum(down_proj)
         # else:
+        input_rotation = B if B is not None else R1
+        output_rotation = A_next if A_next is not None else R1
         down_proj = self.down_proj(
-            self.act_fn(self.gate_proj(x, R1)) * self.up_proj(x, R1),
-            R1,
+            self.act_fn(self.gate_proj(x, input_rotation)) * self.up_proj(x, input_rotation),
+            output_rotation,
             transpose=True,
         )
 
@@ -424,6 +426,8 @@ class LlamaAttention(nn.Module):
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # will become mandatory in v4.46
         R1=None,
+        A=None,
+        B=None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
@@ -457,9 +461,11 @@ class LlamaAttention(nn.Module):
         #     value_states = torch.cat(value_states, dim=-1)
 
         # else:
-        query_states = self.q_proj(hidden_states, R1)
-        key_states = self.k_proj(hidden_states, R1)
-        value_states = self.v_proj(hidden_states, R1, R2=self.R2.weight)
+        input_rotation = A if A is not None else R1
+        output_rotation = B if B is not None else R1
+        query_states = self.q_proj(hidden_states, input_rotation)
+        key_states = self.k_proj(hidden_states, input_rotation)
+        value_states = self.v_proj(hidden_states, input_rotation, R2=self.R2.weight)
 
         query_states = query_states.view(
             bsz, q_len, self.num_heads, self.head_dim
@@ -535,7 +541,7 @@ class LlamaAttention(nn.Module):
         #         ]
         #     )
         # else:
-        attn_output = self.o_proj(attn_output, R1, R2=self.R2.weight, transpose=True)
+        attn_output = self.o_proj(attn_output, output_rotation, R2=self.R2.weight, transpose=True)
 
         if not output_attentions:
             attn_weights = None
@@ -571,6 +577,8 @@ class LlamaFlashAttention2(LlamaAttention):
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # will become mandatory in v4.46
         R1=None,
+        A=None,
+        B=None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if isinstance(past_key_value, StaticCache):
             raise ValueError(
@@ -582,9 +590,11 @@ class LlamaFlashAttention2(LlamaAttention):
 
         bsz, q_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states, R1)
-        key_states = self.k_proj(hidden_states, R1)
-        value_states = self.v_proj(hidden_states, R1, R2=self.R2.weight)
+        input_rotation = A if A is not None else R1
+        output_rotation = B if B is not None else R1
+        query_states = self.q_proj(hidden_states, input_rotation)
+        key_states = self.k_proj(hidden_states, input_rotation)
+        value_states = self.v_proj(hidden_states, input_rotation, R2=self.R2.weight)
 
         # Flash attention requires the input to have the shape
         # batch_size x seq_length x head_dim x hidden_dim
@@ -668,7 +678,7 @@ class LlamaFlashAttention2(LlamaAttention):
         )
 
         attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
-        attn_output = self.o_proj(attn_output, R1, R2=self.R2.weight, transpose=True)
+        attn_output = self.o_proj(attn_output, output_rotation, R2=self.R2.weight, transpose=True)
 
         if not output_attentions:
             attn_weights = None
@@ -697,6 +707,8 @@ class LlamaSdpaAttention(LlamaAttention):
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # will become mandatory in v4.46
         R1=None,
+        A=None,
+        B=None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions:
@@ -714,13 +726,20 @@ class LlamaSdpaAttention(LlamaAttention):
                 use_cache=use_cache,
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
+                R1=R1,
+                A=A,
+                B=B,
+                **kwargs,
             )
 
         bsz, q_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states, R1)
-        key_states = self.k_proj(hidden_states, R1)
-        value_states = self.v_proj(hidden_states, R1, R2=self.R2.weight)
+        input_rotation = A if A is not None else R1
+        output_rotation = B if B is not None else R1
+        
+        query_states = self.q_proj(hidden_states, input_rotation)
+        key_states = self.k_proj(hidden_states, input_rotation)
+        value_states = self.v_proj(hidden_states, input_rotation, R2=self.R2.weight)
 
         query_states = query_states.view(
             bsz, q_len, self.num_heads, self.head_dim
@@ -783,7 +802,7 @@ class LlamaSdpaAttention(LlamaAttention):
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, -1)
 
-        attn_output = self.o_proj(attn_output, R1, R2=self.R2.weight, transpose=True)
+        attn_output = self.o_proj(attn_output, output_rotation, R2=self.R2.weight, transpose=True)
 
         return attn_output, None, past_key_value
 
@@ -823,6 +842,9 @@ class LlamaDecoderLayer(nn.Module):
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # will become mandatory in v4.46
         R1=None,
+        A=None,
+        B=None,
+        A_next=None,
         **kwargs,
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
@@ -851,6 +873,11 @@ class LlamaDecoderLayer(nn.Module):
         """
         residual = hidden_states
 
+        # basis transition from Attention input to MLP input
+        # upcasting to float64 in rotation multiplication and downcasting to original residual dtype
+        if A is not None:
+            residual = (residual.to(torch.float64) @ (A.T.to(torch.float64) @ B.to(torch.float64))).to(residual.dtype)
+
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
@@ -864,14 +891,22 @@ class LlamaDecoderLayer(nn.Module):
             cache_position=cache_position,
             position_embeddings=position_embeddings,
             R1=R1,
+            A=A,
+            B=B,
             **kwargs,
         )
         hidden_states = residual + hidden_states
 
-        # Fully Connected
         residual = hidden_states
+
+        # basis transition from MLP input to next Attention input
+        # upcasting to float64 in rotation multiplication and downcasting to original residual dtype
+        if B is not None:
+            residual = (residual.to(torch.float64) @ (B.T.to(torch.float64) @ A_next.to(torch.float64))).to(residual.dtype)
+
+        # Fully Connected
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states, R1=R1)
+        hidden_states = self.mlp(hidden_states, R1=R1, B=B, A_next=A_next)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -1058,6 +1093,8 @@ class LlamaModel(LlamaPreTrainedModel):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         R1=None,
+        As=None,
+        Bs=None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
             output_attentions
@@ -1087,11 +1124,18 @@ class LlamaModel(LlamaPreTrainedModel):
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-        if R1 is not None:
+
+        # if R1 is not None:
+        #     dtype = inputs_embeds.dtype
+        #     inputs_embeds = (inputs_embeds.to(torch.float64) @ R1.to(torch.float64)).to(
+        #         dtype
+        #     )
+        input_rotation = As[0] if As is not None else R1
+        if input_rotation is not None:
             dtype = inputs_embeds.dtype
-            inputs_embeds = (inputs_embeds.to(torch.float64) @ R1.to(torch.float64)).to(
-                dtype
-            )
+            inputs_embeds = (
+                inputs_embeds.to(torch.float64) @ input_rotation.to(torch.float64)
+            ).to(dtype)
 
         return_legacy_cache = False
         if (
@@ -1133,7 +1177,12 @@ class LlamaModel(LlamaPreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        for decoder_layer in self.layers:
+        for layer_idx, decoder_layer in enumerate(self.layers):
+            A = As[layer_idx] if As is not None else None
+            B = Bs[layer_idx] if Bs is not None else None
+            # last layer does not have next A, so we set it to None
+            A_next = As[layer_idx + 1] if As is not None and layer_idx + 1 < len(As) else None
+
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -1149,6 +1198,9 @@ class LlamaModel(LlamaPreTrainedModel):
                     cache_position,
                     position_embeddings,
                     R1,
+                    A,
+                    B,
+                    A_next,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -1161,6 +1213,9 @@ class LlamaModel(LlamaPreTrainedModel):
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
                     R1=R1,
+                    A=A,
+                    B=B,
+                    A_next=A_next,
                 )
 
             hidden_states = layer_outputs[0]
@@ -1277,6 +1332,9 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         self.model = LlamaModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.R1 = None
+        self.A = None
+        self.B = None
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1362,6 +1420,9 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             return_dict if return_dict is not None else self.config.use_return_dict
         )
 
+        As = [rotation.weight for rotation in self.A] if self.A is not None else None
+        Bs = [rotation.weight for rotation in self.B] if self.B is not None else None
+        R1 = self.R1.weight if self.R1 is not None else None
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
@@ -1374,14 +1435,18 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
-            R1=self.R1.weight,
+            R1=R1,
+            As=As,
+            Bs=Bs,
+            # R1=self.R1.weight,
         )
 
         hidden_states = outputs[0]
-        if self.R1 is not None:
+        output_rotation = As[-1] if As is not None else R1
+        if output_rotation is not None:
             dtype = hidden_states.dtype
             hidden_states = (
-                hidden_states.to(torch.float64) @ self.R1.weight.T.to(torch.float64)
+                hidden_states.to(torch.float64) @ output_rotation.T.to(torch.float64)
             ).to(dtype)
 
         if self.config.pretraining_tp > 1:
