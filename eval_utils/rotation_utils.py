@@ -119,32 +119,71 @@ def rotate_ov_proj(layer, head_num, head_dim, R2=None):
     apply_exact_had_to_linear(o_proj, had_dim=head_dim, output=False, R2=R2)
 
 
-@torch.inference_mode()
+@torch.no_grad()
 def rotate_model(model, args):
-    R1 = get_orthogonal_matrix(model.config.hidden_size, args.rotate_mode)
+
+    layerwise = getattr(args, "layerwise", False)
+
+    # R1 = get_orthogonal_matrix(model.config.hidden_size, args.rotate_mode)
+    # get checkpoint for rotation matrices
     if args.optimized_rotation_path is not None:
         R_cpk = args.optimized_rotation_path
-        R1 = torch.load(R_cpk)["R1"].cuda().to(torch.float64)
+        checkpoint = torch.load(R_cpk, map_location="cpu")
+        # R1 = torch.load(R_cpk)["R1"].cuda().to(torch.float64)
+    else:
+        checkpoint = None
+
     config = model.config
     num_heads = config.num_attention_heads
     model_dim = config.hidden_size
     head_dim = model_dim // num_heads
+    num_layers = len(model.model.layers)
 
-    rotate_embeddings(model, R1)
-    rotate_head(model, R1)
+    # rotate_embeddings(model, R1)
+    # rotate_head(model, R1)
+
+    def rotation(key, size):
+        # Get the rotation matrix from the checkpoint if it exists, otherwise generate a new one.
+        if checkpoint is not None:
+            return checkpoint[key].to(device="cuda", dtype=torch.float64)
+        return get_orthogonal_matrix(size, args.rotate_mode)
+
+    # config.layerwise = layerwise
+    # first residual rotation for the first layer
+    A = rotation("A.0" if layerwise else "R1", model_dim)
+    rotate_embeddings(model, A)
     utils.cleanup_memory()
+
     layers = [layer for layer in model.model.layers]
     for idx, layer in enumerate(tqdm.tqdm(layers, unit="layer", desc="Rotating")):
-        if args.optimized_rotation_path is not None:
-            key = f"model.layers.{idx}.self_attn.R2"
-            R2 = torch.load(R_cpk)[key].cuda().to(torch.float64)
-        else:
-            R2 = get_orthogonal_matrix(head_dim, args.rotate_mode)
-        rotate_attention_inputs(layers[idx], R1)
-        rotate_attention_output(layers[idx], R1)
-        rotate_mlp_input(layers[idx], R1)
-        rotate_mlp_output(layers[idx], R1)
-        rotate_ov_proj(layers[idx], num_heads, head_dim, R2=R2)
+        # if args.optimized_rotation_path is not None:
+        #     key = f"model.layers.{idx}.self_attn.R2"
+        #     R2 = torch.load(R_cpk)[key].cuda().to(torch.float64)
+        # else:
+        #     R2 = get_orthogonal_matrix(head_dim, args.rotate_mode)
+        # rotate_attention_inputs(layers[idx], R1)
+        # rotate_attention_output(layers[idx], R1)
+        # rotate_mlp_input(layers[idx], R1)
+        # rotate_mlp_output(layers[idx], R1)
+        # rotate_ov_proj(layers[idx], num_heads, head_dim, R2=R2)
+        B = rotation(f"B.{idx}", model_dim) if layerwise else A
+        A_next = rotation(f"A.{idx+1}", model_dim) if layerwise else A
+        R2 = rotation(f"model.layers.{idx}.self_attn.R2", head_dim)
+        # rotation fuse
+        rotate_attention_inputs(layer, A)
+        rotate_attention_output(layer, B)
+        rotate_mlp_input(layer, B)
+        rotate_mlp_output(layer, A_next)
+        rotate_ov_proj(layer, num_heads, head_dim, R2=R2)
+        if layerwise:
+            dtype = layer.self_attn.q_proj.weight.dtype
+            device = layer.self_attn.q_proj.weight.device
+            layer.attn_residual_rotation = (A.T @ B).to(device=device, dtype=dtype)
+            layer.mlp_residual_rotation = (B.T @ A_next).to(device=device, dtype=dtype)
+            # LlamaDecoderLayer.forward will apply the residual rotation to the residual connection
+        A = A_next
+    # last residual rotation for the head
+    rotate_head(model, A)
 
 
 class QKRotationWrapper(torch.nn.Module):

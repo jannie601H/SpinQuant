@@ -103,24 +103,68 @@ def evaluator(model, testenc, dev, args):
         torch.cuda.empty_cache()
         inps, outs = outs, inps
 
+    # if model.model.norm is not None:
+    #     model.model.norm = model.model.norm.to(dev)
+
+    # model.lm_head = model.lm_head.to(dev)
+    # nlls = []
+    # loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+    # for i in range(nbatches):
+    #     hidden_states = inps[i]
+    #     if model.model.norm is not None:
+    #         hidden_states = model.model.norm(hidden_states)
+    #     lm_logits = model.lm_head(hidden_states)
+    #     shift_logits = lm_logits[:, :-1, :]
+    #     shift_labels = input_ids[i][:, 1:]
+    #     loss = loss_fct(shift_logits.float().permute(0, 2, 1), shift_labels)
+    #     neg_log_likelihood = loss.float().mean(dim=1)
+    #     nlls.append(neg_log_likelihood)
+    # nlls_tensor = torch.cat(nlls)
+    # ppl = torch.exp(nlls_tensor.mean())
+
+    # Decoder 계산에서 사용했던 이전 layer 출력은 이제 필요 없음
+    del outs
+    torch.cuda.empty_cache()
+
     if model.model.norm is not None:
         model.model.norm = model.model.norm.to(dev)
 
     model.lm_head = model.lm_head.to(dev)
-    nlls = []
-    loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
-    for i in range(nbatches):
+
+    token_chunk_size = 128
+    loss_fct = torch.nn.CrossEntropyLoss(reduction="sum")
+    total_nll = torch.zeros((), device=dev, dtype=torch.float64)
+    total_tokens = 0
+
+    for i in tqdm(range(nbatches), desc="(Eval) PPL"):
         hidden_states = inps[i]
         if model.model.norm is not None:
             hidden_states = model.model.norm(hidden_states)
-        lm_logits = model.lm_head(hidden_states)
-        shift_logits = lm_logits[:, :-1, :]
-        shift_labels = input_ids[i][:, 1:]
-        loss = loss_fct(shift_logits.permute(0, 2, 1), shift_labels)
-        neg_log_likelihood = loss.float().mean(dim=1)
-        nlls.append(neg_log_likelihood)
-    nlls_tensor = torch.cat(nlls)
-    ppl = torch.exp(nlls_tensor.mean())
+
+        # 이 배치의 입력을 리스트에서 해제
+        inps[i] = None
+        seq_len = hidden_states.shape[1]
+
+        for start in range(0, seq_len - 1, token_chunk_size):
+            end = min(start + token_chunk_size, seq_len - 1)
+
+            # 전체 sequence가 아닌 작은 구간만 vocabulary로 projection
+            logits = model.lm_head(hidden_states[:, start:end, :])
+            labels = input_ids[i][:, start + 1:end + 1]
+
+            # loss는 FP32로 계산하고, 합계는 FP64로 누적
+            chunk_nll = loss_fct(
+                logits.float().reshape(-1, logits.shape[-1]),
+                labels.reshape(-1),
+            )
+            total_nll += chunk_nll.double()
+            total_tokens += labels.numel()
+
+            del logits, labels, chunk_nll
+
+        del hidden_states
+
+    ppl = torch.exp(total_nll / total_tokens)
     model.config.use_cache = use_cache
     logging.info(f"\n WikiText2 PPL: {ppl.item():.3f}")
     return ppl.item()

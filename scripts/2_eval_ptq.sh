@@ -7,6 +7,16 @@
 
 # nnodes determines the number of GPU nodes to utilize (usually 1 for an 8 GPU node)
 # nproc_per_node indicates the number of GPUs per node to employ.
+
+# Usage:
+# bash scripts/2_eval_ptq.sh <input_model> <w_bits> <a_bits> <kv_bits> <layerwise_flag>
+# Example:
+# bash scripts/2_eval_ptq.sh meta-llama/Llama-3.2-1B 4 4 4 true
+LAYERWISE_FLAG="--no-layerwise"
+if [ "$5" = true ] || [ "$5" = True ] || [ "$5" = 1 ]; then
+  LAYERWISE_FLAG="--layerwise"
+fi
+
 torchrun --nnodes=1 --nproc_per_node=1 ptq.py \
 --input_model $1 \
 --do_train False \
@@ -27,5 +37,6 @@ torchrun --nnodes=1 --nproc_per_node=1 ptq.py \
 --k_groupsize 64 \
 --v_groupsize 64 \
 --rotate \
+$LAYERWISE_FLAG \
 --optimized_rotation_path "results/output_rotation/R.bin" \
 

@@ -801,6 +801,9 @@ class LlamaDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
 
+        self.register_buffer("attn_residual_rotation", None)
+        self.register_buffer("mlp_residual_rotation", None)
+
         self.self_attn = LLAMA_ATTENTION_CLASSES[config._attn_implementation](
             config=config, layer_idx=layer_idx
         )
@@ -851,6 +854,10 @@ class LlamaDecoderLayer(nn.Module):
         """
         residual = hidden_states
 
+        # residual rotation for attention residual connection
+        if self.attn_residual_rotation is not None:
+            residual = residual @ self.attn_residual_rotation
+
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
@@ -869,6 +876,11 @@ class LlamaDecoderLayer(nn.Module):
 
         # Fully Connected
         residual = hidden_states
+
+        # residual rotation for MLP residual connection
+        if self.mlp_residual_rotation is not None:
+            residual = residual @ self.mlp_residual_rotation
+
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
