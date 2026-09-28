@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Run a sequential rotation-training/PPL grid without editing existing scripts.
+"""Run explicitly named rotation-training/PPL experiments in declaration order.
 
-Use the Python environment containing SpinQuant's dependencies. For example:
+Edit EXPERIMENTS below to specify each experiment's complete conditions.
+Use the Python environment containing SpinQuant's dependencies:
 
-    python scripts/run_experiments.py --models meta-llama/Llama-3.2-1B \
-        --w-bits 4 --a-bits 4 8 --kv-bits 4 \
-        --layerwise-flags false true --learning-rates 0.5 1.5 --dry-run
+    python scripts/run_experiments.py --dry-run
+    python scripts/run_experiments.py --experiments exp1 exp3 --dry-run
 
 Remove --dry-run to execute. CUDA_VISIBLE_DEVICES selects the GPU; each stage
-uses one torchrun worker. All supplied lists form a Cartesian product.
+uses one torchrun worker. Without --experiments, every configured entry runs.
 Results are written under results/experiments, relative to the repository.
-Failures are recorded and the grid continues; Ctrl-C/SIGTERM stops the grid.
+Failures are recorded and execution continues; Ctrl-C/SIGTERM stops the run.
 Exit codes: 0 = all succeeded (or dry run), 1 = failures, 130 = interrupted.
 
 Full-model Trainer checkpoints and external metric reporters are disabled;
@@ -25,7 +25,6 @@ import csv
 from datetime import datetime, timezone
 import fcntl
 import importlib.util
-import itertools
 import json
 import math
 import os
@@ -41,6 +40,38 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_STEPS = 100
+
+# 실행할 실험을 아래에 직접 정의합니다. 각 항목은 한 번씩, 작성 순서대로 실행됩니다.
+# 아래 exp1~exp3은 편집용 예시입니다. 항목을 복사해 exp4 등을 추가할 수 있습니다.
+# model은 Hugging Face 모델 ID 또는 로컬 모델 디렉터리입니다.
+# layerwise_flag에는 문자열이 아닌 Python의 True / False를 사용합니다.
+EXPERIMENTS = {
+    "exp1": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "layerwise_flag": False,
+        "learning_rate": 1.5,
+    },
+    "exp2": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "layerwise_flag": True,
+        "learning_rate": 1.5,
+    },
+    "exp3": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "layerwise_flag": True,
+        "learning_rate": 0.5,
+    },
+}
+
 SUMMARY_FIELDS = [
     "experiment", "model", "w_bits", "a_bits", "kv_bits", "layerwise_flag",
     "learning_rate", "max_steps", "seed", "status", "final_ppl",
@@ -48,38 +79,14 @@ SUMMARY_FIELDS = [
 ]
 
 
-def bit_width(value):
-    bits = int(value)
-    if not 2 <= bits <= 16:
-        raise argparse.ArgumentTypeError("bit widths must be between 2 and 16")
-    return bits
-
-
-def learning_rate(value):
-    rate = float(value)
-    if not math.isfinite(rate) or rate <= 0:
-        raise argparse.ArgumentTypeError("learning rates must be finite and positive")
-    return rate
-
-
-def boolean(value):
-    if value.lower() in ("true", "1"):
-        return True
-    if value.lower() in ("false", "0"):
-        return False
-    raise argparse.ArgumentTypeError("use true or false")
-
-
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--models", nargs="+", required=True, help="HF IDs or local model directories")
-    parser.add_argument("--w-bits", nargs="+", type=bit_width, default=[4])
-    parser.add_argument("--a-bits", nargs="+", type=bit_width, default=[4])
-    parser.add_argument("--kv-bits", nargs="+", type=bit_width, default=[4])
-    parser.add_argument("--layerwise-flags", nargs="+", type=boolean, default=[False, True])
-    parser.add_argument("--learning-rates", nargs="+", type=learning_rate, default=[1.5])
+    parser.add_argument(
+        "--experiments", nargs="+", choices=list(EXPERIMENTS), metavar="NAME",
+        help="Run only these names, in EXPERIMENTS order (default: all entries)",
+    )
     parser.add_argument("--seed", type=int, default=0, help="Rotation/PTQ seed (Trainer seed stays 42)")
     parser.add_argument("--eval-batch-size", type=int, default=4)
     parser.add_argument(
@@ -96,21 +103,41 @@ def parse_args(argv=None):
     if args.kv_groupsize != -1 and args.kv_groupsize < 1:
         parser.error("--kv-groupsize must be positive or -1")
     args.results_dir = args.results_dir.resolve()
-    args.models = [str(Path(model).resolve()) if Path(model).is_dir() else model for model in args.models]
     return args
 
 
 def conditions(args):
-    names = ("model", "w_bits", "a_bits", "kv_bits", "layerwise_flag", "learning_rate")
-    lists = (args.models, args.w_bits, args.a_bits, args.kv_bits, args.layerwise_flags, args.learning_rates)
-    for values in itertools.product(*(dict.fromkeys(items) for items in lists)):
-        yield dict(zip(names, values), max_steps=MAX_STEPS, seed=args.seed)
+    required = {"model", "w_bits", "a_bits", "kv_bits", "layerwise_flag", "learning_rate"}
+    selected = set(args.experiments) if args.experiments else set(EXPERIMENTS)
+    if not selected:
+        raise ValueError("EXPERIMENTS is empty; define at least one experiment")
+    for name, definition in EXPERIMENTS.items():
+        if name not in selected:
+            continue
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", name):
+            raise ValueError(f"Invalid experiment name {name!r}; use 1-32 letters, digits, '-' or '_'")
+        if not isinstance(definition, dict) or set(definition) != required:
+            raise ValueError(f"{name}: specify exactly these fields: {', '.join(sorted(required))}")
+        config = dict(definition, name=name, max_steps=MAX_STEPS, seed=args.seed)
+        if not isinstance(config["model"], str) or not config["model"].strip():
+            raise ValueError(f"{name}: model must be a nonempty model ID or directory")
+        for field in ("w_bits", "a_bits", "kv_bits"):
+            if type(config[field]) is not int or not 2 <= config[field] <= 16:
+                raise ValueError(f"{name}: {field} must be an integer between 2 and 16")
+        if type(config["layerwise_flag"]) is not bool:
+            raise ValueError(f"{name}: layerwise_flag must be True or False, not a string")
+        rate = config["learning_rate"]
+        if type(rate) not in (int, float) or not math.isfinite(rate) or rate <= 0:
+            raise ValueError(f"{name}: learning_rate must be a finite positive number")
+        if Path(config["model"]).is_dir():
+            config["model"] = str(Path(config["model"]).resolve())
+        yield config
 
 
 def experiment_name(config):
     model = re.sub(r"[^A-Za-z0-9._-]+", "-", config["model"]).strip(".-")[:100] or "model"
     return (
-        f"{model}_w{config['w_bits']}_a{config['a_bits']}_kv{config['kv_bits']}"
+        f"{config['name']}_{model}_w{config['w_bits']}_a{config['a_bits']}_kv{config['kv_bits']}"
         f"_layerwise-{str(config['layerwise_flag']).lower()}_lr{config['learning_rate']}"
     )
 
@@ -161,7 +188,7 @@ def write_result(directory, result):
 
 
 def append_summary(results_dir, result):
-    row = {**result["conditions"], **{key: result.get(key) for key in SUMMARY_FIELDS if key not in result["conditions"]}}
+    row = {key: result["conditions"].get(key, result.get(key)) for key in SUMMARY_FIELDS}
     with (results_dir / "summary.csv").open("a+", newline="", encoding="utf-8") as output:
         # Keep header and rows intact if separate runners share this directory.
         fcntl.flock(output, fcntl.LOCK_EX)
@@ -237,7 +264,7 @@ def run_experiment(config, directory, args, version):
     directory.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()
     result = {
-        "experiment": directory.name, "conditions": config,
+        "experiment": config["name"], "conditions": config,
         "status": "training", "final_ppl": None, "error": None,
         "started_at": now(), "finished_at": None, "duration_seconds": None,
         "result_dir": str(directory), "rotation_path": None,
@@ -291,17 +318,21 @@ def run_experiment(config, directory, args, version):
 
 def main(argv=None):
     args = parse_args(argv)
-    grid = list(conditions(args))
-    print(f"{len(grid)} experiments; max_steps={MAX_STEPS}; results={args.results_dir}", flush=True)
+    try:
+        experiments = list(conditions(args))
+    except ValueError as error:
+        print(f"Invalid EXPERIMENTS configuration: {error}", file=sys.stderr)
+        return 1
+    print(f"{len(experiments)} experiments; max_steps={MAX_STEPS}; results={args.results_dir}", flush=True)
     if not args.dry_run and importlib.util.find_spec("torch") is None:
         print("PyTorch is unavailable. Run with the Python environment containing SpinQuant's dependencies.", file=sys.stderr)
         return 1
     version = code_version() if not args.dry_run else None
     failed = 0
-    for index, config in enumerate(grid, 1):
+    for index, config in enumerate(experiments, 1):
         suffix = "DRY_RUN" if args.dry_run else datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "_" + uuid.uuid4().hex[:8]
         directory = args.results_dir / f"{experiment_name(config)}_{suffix}"
-        print(f"[{index}/{len(grid)}] {directory.name}", flush=True)
+        print(f"[{index}/{len(experiments)}] {directory.name}", flush=True)
         if args.dry_run:
             for stage, command in commands(config, directory, args).items():
                 print(f"  {stage}: {shlex.join(command)}")
@@ -311,7 +342,7 @@ def main(argv=None):
             return 130
         failed += status != "success"
     if not args.dry_run:
-        print(f"Finished: {len(grid) - failed} succeeded, {failed} failed. Summary: {args.results_dir / 'summary.csv'}", flush=True)
+        print(f"Finished: {len(experiments) - failed} succeeded, {failed} failed. Summary: {args.results_dir / 'summary.csv'}", flush=True)
     return 1 if failed else 0
 
 
