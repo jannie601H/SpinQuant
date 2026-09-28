@@ -39,7 +39,7 @@ import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MAX_STEPS = 3
+MAX_STEPS = 100
 
 # 실행할 실험을 아래에 직접 정의합니다. 각 항목은 한 번씩, 작성 순서대로 실행됩니다.
 # 아래 exp1~exp3은 편집용 예시입니다. 항목을 복사해 exp4 등을 추가할 수 있습니다.
