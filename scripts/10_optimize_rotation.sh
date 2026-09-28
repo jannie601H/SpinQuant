@@ -33,7 +33,7 @@ torchrun --nnodes=1 --nproc_per_node=1 optimize_rotation.py \
 --lr_scheduler_type "cosine" \
 --gradient_checkpointing True \
 --save_safetensors False \
---max_steps 10 \
+--max_steps 100 \
 --w_bits $2 \
 --a_bits $3 \
 --k_bits $4 \
