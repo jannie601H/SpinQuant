@@ -16,6 +16,8 @@ Exit codes: 0 = all succeeded (or dry run), 1 = failures, 130 = interrupted.
 Full-model Trainer checkpoints and external metric reporters are disabled;
 optimize_rotation.py still saves its final R.bin. Step losses stay in train.log.
 Other training/evaluation defaults follow 10_optimize_rotation.sh/2_eval_ptq.sh.
+Rotation training always uses W16; evaluation uses the configured weight bits
+with GPTQ (weight quantization is skipped for W16 evaluation).
 The existing parser consumes --seed for rotation initialization and PTQ; the
 Trainer's separate seed remains its existing default of 42.
 """
@@ -174,7 +176,7 @@ def commands(config, directory, args):
         "--input_model", config["model"],
         "--model_max_length", "2048", "--fp16", "False", "--bf16", "True",
         "--save_safetensors", "False", "--seed", str(config["seed"]),
-        "--w_bits", str(config["w_bits"]), "--a_bits", str(config["a_bits"]),
+        "--a_bits", str(config["a_bits"]),
         "--k_bits", str(config["kv_bits"]), "--v_bits", str(config["kv_bits"]),
         "--layerwise" if config["layerwise_flag"] else "--no-layerwise",
         "--w_clip", "--a_asym", "--k_asym", "--v_asym",
@@ -182,6 +184,7 @@ def commands(config, directory, args):
         "--report_to", "none",
     ]
     train = launcher + [str(ROOT / "optimize_rotation.py")] + common + [
+        "--w_bits", "16",
         "--output_rotation_path", str(directory),
         "--output_dir", str(directory / "output"),
         "--logging_dir", str(directory / "logs"),
@@ -192,6 +195,7 @@ def commands(config, directory, args):
         "--save_strategy", "no", "--disable_tqdm", "True",
     ]
     evaluate = launcher + [str(ROOT / "ptq.py")] + common + [
+        "--w_bits", str(config["w_bits"]), "--no-w_rtn",
         "--output_dir", str(directory / "eval_output"),
         "--logging_dir", str(directory / "eval_logs"),
         "--do_train", "False", "--do_eval", "True",
