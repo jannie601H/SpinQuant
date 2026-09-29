@@ -96,6 +96,23 @@ EXPERIMENTS = {
         "layerwise_flag": False,
         "learning_rate": 15,
     },
+    "exp7": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "layerwise_flag": True,
+        "learning_rate": 1.5,
+    },
+    "exp8": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 3,
+        "a_bits": 3,
+        "kv_bits": 3,
+        "layerwise_flag": True,
+        "learning_rate": 1.5,
+    },
+        
 }
 
 SUMMARY_FIELDS = [
