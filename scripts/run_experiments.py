@@ -9,7 +9,9 @@ Use the Python environment containing SpinQuant's dependencies:
 
 Remove --dry-run to execute. CUDA_VISIBLE_DEVICES selects the GPU; each stage
 uses one torchrun worker. Without --experiments, every configured entry runs.
-Results are written under results/experiments, relative to the repository.
+Each invocation creates result/experiment(YYYYMMDD_HHMMSS), using Korea time.
+It contains exp1/, exp2/, ... and one summary.csv for that invocation.
+--results-dir changes the parent directory containing these run folders.
 Failures are recorded and execution continues; Ctrl-C/SIGTERM stops the run.
 Exit codes: 0 = all succeeded (or dry run), 1 = failures, 130 = interrupted.
 
@@ -24,7 +26,7 @@ Trainer's separate seed remains its existing default of 42.
 
 import argparse
 import csv
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 import importlib.util
 import json
@@ -37,11 +39,11 @@ import signal
 import subprocess
 import sys
 import time
-import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_STEPS = 100
+RUN_TIMEZONE = timezone(timedelta(hours=9), "KST")
 
 # 실행할 실험을 아래에 직접 정의합니다. 각 항목은 한 번씩, 작성 순서대로 실행됩니다.
 # 아래 exp1~exp3은 편집용 예시입니다. 항목을 복사해 exp4 등을 추가할 수 있습니다.
@@ -112,7 +114,10 @@ def parse_args(argv=None):
         "--kv-groupsize", type=int, default=64,
         help="Existing default: 64. K requires the model head dimension or -1 (token-wise).",
     )
-    parser.add_argument("--results-dir", type=Path, default=ROOT / "results" / "experiments")
+    parser.add_argument(
+        "--results-dir", type=Path, default=ROOT / "result",
+        help="Parent directory for experiment(timestamp) run folders (default: %(default)s)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running or writing files")
     args = parser.parse_args(argv)
     if not 0 <= args.seed < 2**32:
@@ -153,12 +158,23 @@ def conditions(args):
         yield config
 
 
-def experiment_name(config):
-    model = re.sub(r"[^A-Za-z0-9._-]+", "-", config["model"]).strip(".-")[:100] or "model"
-    return (
-        f"{config['name']}_{model}_w{config['w_bits']}_a{config['a_bits']}_kv{config['kv_bits']}"
-        f"_layerwise-{str(config['layerwise_flag']).lower()}_lr{config['learning_rate']}"
-    )
+def create_run_directory(results_dir, dry_run=False):
+    """Reserve a folder per invocation; same-second runs get a numeric suffix."""
+    timestamp = datetime.now(RUN_TIMEZONE).strftime("%Y%m%d_%H%M%S")
+    index = 1
+    while True:
+        suffix = "" if index == 1 else f"_{index}"
+        directory = results_dir / f"experiment({timestamp}{suffix})"
+        if dry_run:
+            if not directory.exists():
+                return directory
+        else:
+            try:
+                directory.mkdir(parents=True, exist_ok=False)
+                return directory
+            except FileExistsError:
+                pass
+        index += 1
 
 
 def commands(config, directory, args):
@@ -371,7 +387,7 @@ def run_experiment(config, directory, args, version):
         result["finished_at"] = now()
         result["duration_seconds"] = round(time.monotonic() - started, 3)
         write_result(directory, result)
-        append_summary(args.results_dir, result)
+        append_summary(directory.parent, result)
     print(f"  {result['status']}: PPL={result['final_ppl']}" + (f"; {result['error']}" if result["error"] else ""), flush=True)
     return result["status"]
 
@@ -383,15 +399,15 @@ def main(argv=None):
     except ValueError as error:
         print(f"Invalid EXPERIMENTS configuration: {error}", file=sys.stderr)
         return 1
-    print(f"{len(experiments)} experiments; max_steps={MAX_STEPS}; results={args.results_dir}", flush=True)
     if not args.dry_run and importlib.util.find_spec("torch") is None:
         print("PyTorch is unavailable. Run with the Python environment containing SpinQuant's dependencies.", file=sys.stderr)
         return 1
     version = code_version() if not args.dry_run else None
+    run_directory = create_run_directory(args.results_dir, dry_run=args.dry_run)
+    print(f"{len(experiments)} experiments; max_steps={MAX_STEPS}; results={run_directory}", flush=True)
     failed = 0
     for index, config in enumerate(experiments, 1):
-        suffix = "DRY_RUN" if args.dry_run else datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "_" + uuid.uuid4().hex[:8]
-        directory = args.results_dir / f"{experiment_name(config)}_{suffix}"
+        directory = run_directory / config["name"]
         print(f"[{index}/{len(experiments)}] {directory.name}", flush=True)
         if args.dry_run:
             for stage, command in commands(config, directory, args).items():
@@ -402,7 +418,7 @@ def main(argv=None):
             return 130
         failed += status != "success"
     if not args.dry_run:
-        print(f"Finished: {len(experiments) - failed} succeeded, {failed} failed. Summary: {args.results_dir / 'summary.csv'}", flush=True)
+        print(f"Finished: {len(experiments) - failed} succeeded, {failed} failed. Summary: {run_directory / 'summary.csv'}", flush=True)
     return 1 if failed else 0
 
 
