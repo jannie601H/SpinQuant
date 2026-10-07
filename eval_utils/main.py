@@ -10,6 +10,9 @@
 
 import torch
 import transformers
+import time
+from logging import Logger, getLogger
+
 
 from eval_utils import gptq_utils, rotation_utils
 from utils import data_utils, fuse_norm_utils, hadamard_utils, quant_utils, utils
@@ -17,6 +20,7 @@ from utils.convert_to_executorch import (
     sanitize_checkpoint_from_spinquant,
     write_model_llama,
 )
+log: Logger = getLogger("spinquant")
 
 
 def ptq_model(args, model, model_args=None):
@@ -26,7 +30,17 @@ def ptq_model(args, model, model_args=None):
     # Rotate the weights
     if args.rotate:
         fuse_norm_utils.fuse_layer_norms(model)
+
+        torch.cuda.synchronize()
+        start_time = time.perf_counter()
         rotation_utils.rotate_model(model, args)
+        torch.cuda.synchronize()
+        end_time = time.perf_counter()
+
+        # log the rotation fuse time
+        rotation_fuse_time = end_time - start_time
+        log.info("Rotation fuse time is: {} seconds".format(rotation_fuse_time))
+
         utils.cleanup_memory(verbos=True)
 
         quant_utils.add_actquant(model)  # Add Activation Wrapper to the model

@@ -7,6 +7,7 @@
 
 import datetime
 from logging import Logger
+import time
 
 import torch
 import torch.distributed as dist
@@ -72,8 +73,17 @@ def train() -> None:
         eval_mode=True,
     )
 
+    torch.cuda.synchronize()
+    start_time = time.perf_counter()
     dataset_ppl = eval_utils.evaluator(model, testloader, utils.DEV, ptq_args)
+    torch.cuda.synchronize()
+    end_time = time.perf_counter()
+
+    # log the evaluation time
+    evaluation_time = end_time - start_time
+
     log.info("wiki2 ppl is: {}".format(dataset_ppl))
+    log.info("Evaluation time is: {} seconds".format(evaluation_time))
     dist.barrier()
 
 

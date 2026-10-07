@@ -9,6 +9,7 @@ import datetime
 import os
 from logging import Logger
 import re
+import time
 
 import datasets
 import torch
@@ -139,9 +140,17 @@ def train() -> None:
         data_collator=default_data_collator,
         optimizers=(optimizer, None),
     )
-    torch.distributed.barrier()
-
+    torch.distributed.barrier()    
+    torch.cuda.synchronize()
+    start_time = time.perf_counter()
     trainer.train()
+    torch.cuda.synchronize()
+    end_time = time.perf_counter()
+
+    # log the rotation training time
+    rotation_training_time = end_time - start_time
+    log.info("Rotation training time is: {} seconds".format(rotation_training_time))
+
     if training_args.fsdp != "" and training_args.fsdp != []:
         cpu_state = pt_fsdp_state_dict(trainer.model)
     else:

@@ -80,45 +80,21 @@ EXPERIMENTS = {
         "layerwise_flag": True,
         "learning_rate": 15,
     },
-    "exp5": {
-        "model": "meta-llama/Llama-3.2-1B",
-        "w_bits": 4,
-        "a_bits": 4,
-        "kv_bits": 4,
-        "layerwise_flag": False,
-        "learning_rate": 15,
-    },
-    "exp6": {
-        "model": "meta-llama/Llama-3.2-1B",
-        "w_bits": 3,
-        "a_bits": 3,
-        "kv_bits": 3,
-        "layerwise_flag": False,
-        "learning_rate": 15,
-    },
-    "exp7": {
-        "model": "meta-llama/Llama-3.2-1B",
-        "w_bits": 4,
-        "a_bits": 4,
-        "kv_bits": 4,
-        "layerwise_flag": True,
-        "learning_rate": 1.5,
-    },
-    "exp8": {
-        "model": "meta-llama/Llama-3.2-1B",
-        "w_bits": 3,
-        "a_bits": 3,
-        "kv_bits": 3,
-        "layerwise_flag": True,
-        "learning_rate": 1.5,
-    },
-        
 }
+
+TIMING_LOG_FIELDS = {
+    "train.log": {"Rotation training time": "rotation_optimize_seconds"},
+    "eval.log": {
+        "Rotation fuse time": "rotation_fusion_seconds",
+        "Evaluation time": "evaluation_seconds",
+    },
+}
+TIMING_FIELDS = [field for labels in TIMING_LOG_FIELDS.values() for field in labels.values()]
 
 SUMMARY_FIELDS = [
     "experiment", "model", "w_bits", "a_bits", "kv_bits", "layerwise_flag",
     "learning_rate", "max_steps", "seed", "status", "final_ppl",
-    "started_at", "finished_at", "duration_seconds", "result_dir", "error",
+    "started_at", "finished_at", "duration_seconds", *TIMING_FIELDS, "result_dir", "error",
 ]
 
 
@@ -237,8 +213,23 @@ def append_summary(results_dir, result):
     with (results_dir / "summary.csv").open("a+", newline="", encoding="utf-8") as output:
         # Keep header and rows intact if separate runners share this directory.
         fcntl.flock(output, fcntl.LOCK_EX)
+        output.seek(0)
+        reader = csv.DictReader(output)
+        previous_fields = reader.fieldnames
+        # Preserve old rows and any extra columns when adding timing fields.
+        fields = SUMMARY_FIELDS + [key for key in (previous_fields or []) if key not in SUMMARY_FIELDS]
+        if previous_fields and previous_fields != fields:
+            previous_rows = list(reader)
+            if any(None in old_row or any(value is None for value in old_row.values())
+                   for old_row in previous_rows):
+                raise ValueError("summary.csv has malformed rows; refusing to rewrite it")
+            output.seek(0)
+            output.truncate()
+            migrated_writer = csv.DictWriter(output, fieldnames=fields)
+            migrated_writer.writeheader()
+            migrated_writer.writerows(previous_rows)
         output.seek(0, os.SEEK_END)
-        writer = csv.DictWriter(output, fieldnames=SUMMARY_FIELDS)
+        writer = csv.DictWriter(output, fieldnames=fields)
         if output.tell() == 0:
             writer.writeheader()
         writer.writerow(row)
@@ -305,6 +296,27 @@ def read_ppl(log_path):
     return value
 
 
+def read_timings(directory):
+    """Read completed intervals only; missing/invalid measurements stay null."""
+    timings = dict.fromkeys(TIMING_FIELDS)
+    for filename, labels in TIMING_LOG_FIELDS.items():
+        path = directory / filename
+        if not path.is_file():
+            continue
+        with path.open(encoding="utf-8", errors="replace") as log:
+            for line in log:
+                for label, field in labels.items():
+                    match = re.search(re.escape(label) + r" is:\s*(\S+)\s+seconds\b", line)
+                    if match:
+                        try:
+                            value = float(match.group(1))
+                        except ValueError:
+                            continue
+                        if math.isfinite(value) and value >= 0:
+                            timings[field] = value
+    return timings
+
+
 def run_experiment(config, directory, args, version):
     directory.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()
@@ -312,6 +324,7 @@ def run_experiment(config, directory, args, version):
         "experiment": config["name"], "conditions": config,
         "status": "training", "final_ppl": None, "error": None,
         "started_at": now(), "finished_at": None, "duration_seconds": None,
+        **dict.fromkeys(TIMING_FIELDS),
         "result_dir": str(directory), "rotation_path": None,
         "return_codes": {"train": None, "eval": None},
         "commands": commands(config, directory, args),
@@ -339,6 +352,7 @@ def run_experiment(config, directory, args, version):
         result["rotation_path"] = str(rotation)
         stage = "eval"
         result["status"] = "evaluating"
+        result.update(read_timings(directory))
         write_result(directory, result)
         code = run_stage(result["commands"][stage], directory / "eval.log", stage)
         result["return_codes"][stage] = code
@@ -353,6 +367,7 @@ def run_experiment(config, directory, args, version):
         result["status"] = f"{stage}_failed"
         result["error"] = str(error)
     finally:
+        result.update(read_timings(directory))
         result["finished_at"] = now()
         result["duration_seconds"] = round(time.monotonic() - started, 3)
         write_result(directory, result)
