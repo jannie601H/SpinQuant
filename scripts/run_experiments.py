@@ -45,7 +45,7 @@ import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MAX_STEPS = 100
+MAX_STEPS = 10
 RUN_TIMEZONE = timezone(timedelta(hours=9), "KST")
 
 # 실행할 실험을 아래에 직접 정의합니다. 각 항목은 한 번씩, 작성 순서대로 실행됩니다.
@@ -59,7 +59,7 @@ EXPERIMENTS = {
         "a_bits": 4,
         "kv_bits": 4,
         "layerwise_flag": False,
-        "learning_rate": 1.5,
+        "learning_rate": 15,
     },
     "exp2": {
         "model": "meta-llama/Llama-3.2-1B",
@@ -75,7 +75,7 @@ EXPERIMENTS = {
         "a_bits": 3,
         "kv_bits": 3,
         "layerwise_flag": False,
-        "learning_rate": 1.5,
+        "learning_rate": 15,
     },
     "exp4": {
         "model": "meta-llama/Llama-3.2-1B",
