@@ -75,7 +75,15 @@ def train() -> None:
 
     torch.cuda.synchronize()
     start_time = time.perf_counter()
-    dataset_ppl = eval_utils.evaluator(model, testloader, utils.DEV, ptq_args)
+    dataset_ppl = eval_utils.evaluator(
+        model, testloader, utils.DEV, ptq_args,
+        stats_metadata={
+            "model": model_args.input_model,
+            "optimized_rotation_path": ptq_args.optimized_rotation_path,
+            "activation_dtype": str(dtype),
+            "tokenizer": tokenizer.name_or_path,
+        },
+    )
     torch.cuda.synchronize()
     end_time = time.perf_counter()
 

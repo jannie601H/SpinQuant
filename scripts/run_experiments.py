@@ -20,6 +20,9 @@ optimize_rotation.py still saves its final R.bin. Step losses stay in train.log.
 Other training/evaluation defaults follow 10_optimize_rotation.sh/2_eval_ptq.sh.
 Rotation training always uses W16; evaluation uses the configured weight bits
 with GPTQ (weight quantization is skipped for W16 evaluation).
+--capture-activation-stats saves scale, x_norm, and error_norm for every layer's
+attention/FFN input in each experiment's activation_stats/ directory. Collection
+runs during evaluation only; evaluation timing then includes collection costs.
 The existing parser consumes --seed for rotation initialization and PTQ; the
 Trainer's separate seed remains its existing default of 42.
 """
@@ -119,6 +122,10 @@ def parse_args(argv=None):
         help="Parent directory for experiment(timestamp) run folders (default: %(default)s)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running or writing files")
+    parser.add_argument(
+        "--capture-activation-stats", action="store_true",
+        help="Save per-token activation quantization statistics during evaluation",
+    )
     args = parser.parse_args(argv)
     if not 0 <= args.seed < 2**32:
         parser.error("--seed must be between 0 and 2**32 - 1")
@@ -148,6 +155,8 @@ def conditions(args):
         for field in ("w_bits", "a_bits", "kv_bits"):
             if type(config[field]) is not int or not 2 <= config[field] <= 16:
                 raise ValueError(f"{name}: {field} must be an integer between 2 and 16")
+        if args.capture_activation_stats and config["a_bits"] >= 16:
+            raise ValueError(f"{name}: activation statistics require a_bits < 16")
         if type(config["layerwise_flag"]) is not bool:
             raise ValueError(f"{name}: layerwise_flag must be True or False, not a string")
         rate = config["learning_rate"]
@@ -211,6 +220,11 @@ def commands(config, directory, args):
         "--per_device_eval_batch_size", str(args.eval_batch_size),
         "--rotate", "--optimized_rotation_path", str(directory / "R.bin"),
     ]
+    if args.capture_activation_stats:
+        evaluate += [
+            "--capture_activation_stats",
+            "--activation_stats_dir", str(directory / "activation_stats"),
+        ]
     return {"train": train, "eval": evaluate}
 
 
@@ -350,6 +364,11 @@ def run_experiment(config, directory, args, version):
             "batch_size": args.eval_batch_size,
             "weight_quantization": "gptq" if config["w_bits"] < 16 else "none",
             "calibration_samples": 128,
+            "activation_stats_dir": (
+                str(directory / "activation_stats")
+                if args.capture_activation_stats else None
+            ),
+            "timing_includes_activation_stats": args.capture_activation_stats,
         },
         "settings": {"trainer_seed": 42, "kv_groupsize": args.kv_groupsize},
         "code": version, "python": sys.executable,

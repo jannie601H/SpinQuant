@@ -251,7 +251,35 @@ def parser_gen():
         "--layer_idx", type=int, default=10, help="Which decoder layer to capture"
     )
 
+    # Activation-stat collection during evaluation
+    parser.add_argument(
+        "--capture_activation_stats",
+        action="store_true",
+        help="Collect per-token activation quantization statistics during evaluation",
+    )
+
+    parser.add_argument(
+        "--activation_stats_dir",
+        type=str,
+        default=None,
+        help="Directory for activation statistics",
+    )
+
     args, unknown = parser.parse_known_args()
+
+    if args.capture_activation_stats:
+        if args.a_bits >= 16:
+            parser.error(
+                "--capture_activation_stats requires --a_bits < 16"
+            )
+        if not args.activation_stats_dir:
+            parser.error(
+                "--capture_activation_stats requires --activation_stats_dir"
+            )
+        if args.capture_layer_io:
+            parser.error(
+                "Use --capture_activation_stats separately from --capture_layer_io"
+            )
 
     # assert (
     #     args.a_groupsize == args.w_groupsize
