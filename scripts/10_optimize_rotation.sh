@@ -9,13 +9,15 @@
 # nproc_per_node indicates the number of GPUs per node to employ.
 
 # Usage:
-# bash scripts/10_optimize_rotation.sh <input_model> <w_bits> <a_bits> <kv_bits> <layerwise_flag>
+# bash scripts/10_optimize_rotation.sh <input_model> <w_bits> <a_bits> <kv_bits> [groupnum]
 # Example:
-# bash scripts/10_optimize_rotation.sh meta-llama/Llama-3.2-1B 4 4 4 true
-LAYERWISE_FLAG="--no-layerwise"
-if [ "$5" = true ] || [ "$5" = True ] || [ "$5" = 1 ]; then
-  LAYERWISE_FLAG="--layerwise"
-fi
+# bash scripts/10_optimize_rotation.sh meta-llama/Llama-3.2-1B 16 4 4 8
+# Explicit true/false still select the legacy layout; numeric 1 means global.
+case "${5:-1}" in
+  true|True) ROTATION_ARGS=(--layerwise) ;;
+  false|False) ROTATION_ARGS=(--no-layerwise) ;;
+  *) ROTATION_ARGS=(--groupnum "${5:-1}") ;;
+esac
 
 torchrun --nnodes=1 --nproc_per_node=1 optimize_rotation.py \
 --input_model $1  \
@@ -38,7 +40,7 @@ torchrun --nnodes=1 --nproc_per_node=1 optimize_rotation.py \
 --a_bits $3 \
 --k_bits $4 \
 --v_bits $4 \
-$LAYERWISE_FLAG \
+"${ROTATION_ARGS[@]}" \
 --w_clip \
 --a_asym \
 --k_asym \

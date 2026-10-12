@@ -282,7 +282,9 @@ class ActQuantWrapper(torch.nn.Module):
 
         if self.quantizer.bits < 16:  # Quantize, if needed
             self.quantizer.find_params(x)
+            # activation before quantization
             x = self.quantizer(x).to(x_dtype)
+            # activation after quantization
             self.quantizer.free()
         if R1 is not None:
             x = self.module(x, R1, R2, transpose).to(x_dtype)

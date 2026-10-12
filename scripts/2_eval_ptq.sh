@@ -9,13 +9,16 @@
 # nproc_per_node indicates the number of GPUs per node to employ.
 
 # Usage:
-# bash scripts/2_eval_ptq.sh <input_model> <w_bits> <a_bits> <kv_bits> <layerwise_flag>
+# bash scripts/2_eval_ptq.sh <input_model> <w_bits> <a_bits> <kv_bits> [groupnum]
 # Example:
-# bash scripts/2_eval_ptq.sh meta-llama/Llama-3.2-1B 4 4 4 true
-LAYERWISE_FLAG="--no-layerwise"
-if [ "$5" = true ] || [ "$5" = True ] || [ "$5" = 1 ]; then
-  LAYERWISE_FLAG="--layerwise"
-fi
+# bash scripts/2_eval_ptq.sh meta-llama/Llama-3.2-1B 4 4 4 8
+# Omit groupnum to read the grouped layout from R.bin.
+case "${5:-}" in
+  "") ROTATION_ARGS=() ;;
+  true|True) ROTATION_ARGS=(--layerwise) ;;
+  false|False) ROTATION_ARGS=(--no-layerwise) ;;
+  *) ROTATION_ARGS=(--groupnum "$5") ;;
+esac
 
 torchrun --nnodes=1 --nproc_per_node=1 ptq.py \
 --input_model $1 \
@@ -37,6 +40,5 @@ torchrun --nnodes=1 --nproc_per_node=1 ptq.py \
 --k_groupsize 64 \
 --v_groupsize 64 \
 --rotate \
-$LAYERWISE_FLAG \
+"${ROTATION_ARGS[@]}" \
 --optimized_rotation_path "results/output_rotation/R.bin" \
-

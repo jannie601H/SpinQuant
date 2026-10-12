@@ -86,7 +86,35 @@ We also provide an example [colab notebook](https://colab.research.google.com/gi
 - `--w_rtn`: Whether we want to use round-to-nearest quantization. If not having `--w_rtn`, we are using GPTQ quantization.
 - `--w_groupsize`: The group size for group-wise weight quantization.
 - `--rotate`: Whether we want to rotate the model
+- `--groupnum`: Number of uniform rotation groups over consecutive Attention/MLP blocks; must divide `2 * num_hidden_layers`. For LLaMA-3.2-1B, use `1, 2, 4, 8, 16, 32`: `1` is global and `32` gives one rotation per block.
 - `--optimized_rotation_path`: The checkpoint path of optimized rotation; Use random rotation if path is not given
+
+### Uniform group-wise rotations
+
+Each group owns one learned hidden-dimension rotation. Attention and MLP inputs
+are numbered consecutively; the final MLP output shares the last group's rotation.
+Only group boundaries require residual basis transitions (`groupnum - 1` total).
+Per-layer `R2` rotations are unchanged.
+
+Pass the group count as the fifth argument to both scripts, for example:
+
+```bash
+bash scripts/10_optimize_rotation.sh meta-llama/Llama-3.2-1B 16 4 4 8
+bash scripts/2_eval_ptq.sh meta-llama/Llama-3.2-1B 4 4 4 8
+```
+
+The equivalent Python option is `--groupnum 8`. `R.bin` stores `Q.0`, `Q.1`, ...,
+per-layer `R2`, and `_rotation_metadata`. Evaluation can infer the group count
+from this checkpoint when `--groupnum` is omitted; an explicit mismatch is rejected.
+`scripts/run_experiments.py` uses `groupnum` in each experiment and in `summary.csv`.
+
+The legacy `--layerwise` option remains for old A/B checkpoints with an independent
+final rotation (33 matrices for the 1B model). It cannot be combined with
+`--groupnum`; new `--groupnum 32` experiments use 32 matrices. With neither option
+nor grouped checkpoint metadata, the Python entry points retain legacy global R1.
+
+CPU regression checks (using the environment with the project dependencies):
+`python -m unittest discover -s tests -v`.
 
  
 ## Quantized Models
@@ -137,4 +165,3 @@ LLM-QAT: Data-Free Quantization Aware Training for Large Language Models [[Paper
 ## License
 
 BiT is CC-BY-NC 4.0 licensed as of now.
-
