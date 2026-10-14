@@ -56,7 +56,7 @@ EXPERIMENTS = {
         "a_bits": 4,
         "kv_bits": 4,
         "groupnum": 1,
-        "learning_rate": 1.5,
+        "learning_rate": 15,
     },
     "exp2": {
         "model": "meta-llama/Llama-3.2-1B",
@@ -72,7 +72,7 @@ EXPERIMENTS = {
         "a_bits": 3,
         "kv_bits": 3,
         "groupnum": 1,
-        "learning_rate": 1.5,
+        "learning_rate": 15,
     },
     "exp4": {
         "model": "meta-llama/Llama-3.2-1B",
