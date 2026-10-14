@@ -26,6 +26,7 @@ Trainer's separate seed remains its existing default of 42.
 
 import argparse
 import csv
+from curses import meta
 from datetime import datetime, timedelta, timezone
 import fcntl
 import importlib.util
@@ -63,10 +64,42 @@ EXPERIMENTS = {
         "w_bits": 4,
         "a_bits": 4,
         "kv_bits": 4,
-        "groupnum": 32,
+        "groupnum": 2,
         "learning_rate": 15,
     },
     "exp3": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "groupnum": 4,
+        "learning_rate": 15,
+    },
+    "exp4": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "groupnum": 8,
+        "learning_rate": 15,
+    },
+    "exp5": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "groupnum": 16,
+        "learning_rate": 15,
+    },
+    "exp6": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "groupnum": 32,
+        "learning_rate": 15,
+    },
+    "exp7": {
         "model": "meta-llama/Llama-3.2-1B",
         "w_bits": 3,
         "a_bits": 3,
@@ -74,14 +107,46 @@ EXPERIMENTS = {
         "groupnum": 1,
         "learning_rate": 15,
     },
-    "exp4": {
+    "exp8": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 3,
+        "a_bits": 3,
+        "kv_bits": 3,
+        "groupnum": 2,
+        "learning_rate": 15,
+    },
+    "exp9": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 3,
+        "a_bits": 3,
+        "kv_bits": 3,
+        "groupnum": 4,
+        "learning_rate": 15,
+    },
+    "exp10": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 3,
+        "a_bits": 3,
+        "kv_bits": 3,
+        "groupnum": 8,
+        "learning_rate": 15,
+    },
+    "exp11": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 3,
+        "a_bits": 3,
+        "kv_bits": 3,
+        "groupnum": 16,
+        "learning_rate": 15,
+    },
+    "exp12": {
         "model": "meta-llama/Llama-3.2-1B",
         "w_bits": 3,
         "a_bits": 3,
         "kv_bits": 3,
         "groupnum": 32,
         "learning_rate": 15,
-    },
+    }
 }
 
 TIMING_LOG_FIELDS = {
