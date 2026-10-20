@@ -50,6 +50,8 @@ RUN_TIMEZONE = timezone(timedelta(hours=9), "KST")
 # 아래 exp1~exp3은 편집용 예시입니다. 항목을 복사해 exp4 등을 추가할 수 있습니다.
 # model은 Hugging Face 모델 ID 또는 로컬 모델 디렉터리입니다.
 # groupnum은 Attention/MLP block을 나눌 그룹 개수입니다 (1B: 1, 2, 4, 8, 16, 32).
+# groupnum 대신 layerwise를 지정할 수 있습니다: True는 기존 full layer-wise, False는 global.
+# groupnum과 layerwise 중 정확히 하나만 지정해야 합니다.
 EXPERIMENTS = {
     "exp1": {
         "model": "meta-llama/Llama-3.2-1B",
@@ -159,7 +161,7 @@ TIMING_LOG_FIELDS = {
 TIMING_FIELDS = [field for labels in TIMING_LOG_FIELDS.values() for field in labels.values()]
 
 SUMMARY_FIELDS = [
-    "experiment", "model", "w_bits", "a_bits", "kv_bits", "groupnum",
+    "experiment", "model", "w_bits", "a_bits", "kv_bits", "groupnum", "layerwise",
     "learning_rate", "max_steps", "seed", "status", "final_ppl",
     "started_at", "finished_at", "duration_seconds", *TIMING_FIELDS, "result_dir", "error",
 ]
@@ -196,7 +198,7 @@ def parse_args(argv=None):
 
 
 def conditions(args):
-    required = {"model", "w_bits", "a_bits", "kv_bits", "groupnum", "learning_rate"}
+    required = {"model", "w_bits", "a_bits", "kv_bits", "learning_rate"}
     selected = set(args.experiments) if args.experiments else set(EXPERIMENTS)
     if not selected:
         raise ValueError("EXPERIMENTS is empty; define at least one experiment")
@@ -205,16 +207,27 @@ def conditions(args):
             continue
         if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", name):
             raise ValueError(f"Invalid experiment name {name!r}; use 1-32 letters, digits, '-' or '_'")
-        if not isinstance(definition, dict) or set(definition) != required:
-            raise ValueError(f"{name}: specify exactly these fields: {', '.join(sorted(required))}")
+        if not isinstance(definition, dict):
+            raise ValueError(f"{name}: experiment conditions must be a dictionary")
+        layouts = set(definition) & {"groupnum", "layerwise"}
+        if len(layouts) != 1:
+            raise ValueError(f"{name}: specify exactly one of groupnum or layerwise")
+        if set(definition) != required | layouts:
+            raise ValueError(
+                f"{name}: specify exactly these fields: {', '.join(sorted(required))}, "
+                "and exactly one of groupnum or layerwise"
+            )
         config = dict(definition, name=name, max_steps=MAX_STEPS, seed=args.seed)
         if not isinstance(config["model"], str) or not config["model"].strip():
             raise ValueError(f"{name}: model must be a nonempty model ID or directory")
         for field in ("w_bits", "a_bits", "kv_bits"):
             if type(config[field]) is not int or not 2 <= config[field] <= 16:
                 raise ValueError(f"{name}: {field} must be an integer between 2 and 16")
-        if type(config["groupnum"]) is not int or config["groupnum"] < 1:
-            raise ValueError(f"{name}: groupnum must be a positive integer")
+        if "groupnum" in config:
+            if type(config["groupnum"]) is not int or config["groupnum"] < 1:
+                raise ValueError(f"{name}: groupnum must be a positive integer")
+        elif type(config["layerwise"]) is not bool:
+            raise ValueError(f"{name}: layerwise must be True or False")
         rate = config["learning_rate"]
         if type(rate) not in (int, float) or not math.isfinite(rate) or rate <= 0:
             raise ValueError(f"{name}: learning_rate must be a finite positive number")
@@ -246,13 +259,18 @@ def commands(config, directory, args):
     # Use this interpreter for both torchrun and its worker, so the active
     # environment supplies all dependencies. --standalone allocates a free port.
     launcher = [sys.executable, "-m", "torch.distributed.run", "--standalone", "--nnodes=1", "--nproc_per_node=1"]
+    layout = (
+        ["--groupnum", str(config["groupnum"])]
+        if "groupnum" in config else
+        ["--layerwise" if config["layerwise"] else "--no-layerwise"]
+    )
     common = [
         "--input_model", config["model"],
         "--model_max_length", "2048", "--fp16", "False", "--bf16", "True",
         "--save_safetensors", "False", "--seed", str(config["seed"]),
         "--a_bits", str(config["a_bits"]),
         "--k_bits", str(config["kv_bits"]), "--v_bits", str(config["kv_bits"]),
-        "--groupnum", str(config["groupnum"]),
+        *layout,
         "--w_clip", "--a_asym", "--k_asym", "--v_asym",
         "--k_groupsize", str(args.kv_groupsize), "--v_groupsize", str(args.kv_groupsize),
         "--report_to", "none",
