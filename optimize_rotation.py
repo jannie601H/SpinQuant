@@ -24,6 +24,7 @@ from train_utils.optimizer import SGDG
 from utils.data_utils import CustomJsonDataset
 from utils.hadamard_utils import random_hadamard_matrix
 from utils.process_args import process_args_ptq
+from utils.rotation_groups import METADATA_KEY, rotation_group_indices, rotation_group_metadata
 from utils.utils import get_local_rank, get_logger, pt_fsdp_state_dict
 
 log: Logger = get_logger("spinquant")
@@ -52,6 +53,8 @@ def train() -> None:
     config = transformers.AutoConfig.from_pretrained(
         model_args.input_model, token=model_args.access_token
     )
+    if ptq_args.groupnum is not None:
+        rotation_group_indices(config.num_hidden_layers, ptq_args.groupnum)
 
     # Llama v3.2 specific: Spinquant is not compatiable with tie_word_embeddings, clone lm_head from embed_tokens
     process_word_embeddings = False
@@ -73,8 +76,13 @@ def train() -> None:
         param.requires_grad = False
     R1 = random_hadamard_matrix(model.config.hidden_size, "cuda")
 
-    ## if layerwise is true, we will use layer-wise A/B rotations instead of global R1
-    if ptq_args.layerwise:
+    if ptq_args.groupnum is not None:
+        model.set_group_rotations([
+            RotateModule(R1.clone()) for _ in range(ptq_args.groupnum)
+        ])
+        log.info("Rotation groups: %s groups, %s blocks per group; final output shares the last group",
+                 ptq_args.groupnum, 2 * config.num_hidden_layers // ptq_args.groupnum)
+    elif ptq_args.layerwise:
         # A need 1 more than the number of layers, since the last layer does not have next A
         model.A = nn.ModuleList([
             RotateModule(R1.clone()) for _ in range(model.config.num_hidden_layers + 1)
@@ -115,11 +123,14 @@ def train() -> None:
         block_size=min(training_args.model_max_length, 2048),
     )
 
-    # if ptq_args.layerwise is true, layer-wise A/B rotations will be trained
-    trainable_parameters = (
-        list(model.A.parameters()) + list(model.B.parameters())
-        if ptq_args.layerwise else [model.R1.weight]
-    ) + [
+    # Register each shared group Parameter exactly once with the optimizer.
+    if model.Q is not None:
+        trainable_parameters = list(model.Q.parameters())
+    elif ptq_args.layerwise:
+        trainable_parameters = list(model.A.parameters()) + list(model.B.parameters())
+    else:
+        trainable_parameters = [model.R1.weight]
+    trainable_parameters += [
         model.model.layers[i].self_attn.R2.weight
         for i in range(model.config.num_hidden_layers)
     ]
@@ -156,16 +167,18 @@ def train() -> None:
     else:
         cpu_state = trainer.model.state_dict()
 
-    # save only the rotation matrices from the model state dict (R1, R2, A, B)
+    # Save each group once, together with the layout used by training/evaluation.
     R_dict = {
         key.replace(".weight", ""): value
         for key, value in cpu_state.items()
         if (
             "R1.weight" in key
             or "self_attn.R2" in key
-            or re.search(r"(?:^|\.)[AB]\.\d+\.weight$", key)
+            or re.search(r"(?:^|\.)[ABQ]\.\d+\.weight$", key)
         )
     }
+    if ptq_args.groupnum is not None:
+        R_dict[METADATA_KEY] = rotation_group_metadata(config.num_hidden_layers, ptq_args.groupnum)
     if local_rank == 0:
         os.makedirs(model_args.output_rotation_path, exist_ok=True)
         path = os.path.join(model_args.output_rotation_path, "R.bin")

@@ -26,6 +26,7 @@ Trainer's separate seed remains its existing default of 42.
 
 import argparse
 import csv
+from curses import meta
 from datetime import datetime, timedelta, timezone
 import fcntl
 import importlib.util
@@ -48,40 +49,104 @@ RUN_TIMEZONE = timezone(timedelta(hours=9), "KST")
 # 실행할 실험을 아래에 직접 정의합니다. 각 항목은 한 번씩, 작성 순서대로 실행됩니다.
 # 아래 exp1~exp3은 편집용 예시입니다. 항목을 복사해 exp4 등을 추가할 수 있습니다.
 # model은 Hugging Face 모델 ID 또는 로컬 모델 디렉터리입니다.
-# layerwise_flag에는 문자열이 아닌 Python의 True / False를 사용합니다.
+# groupnum은 Attention/MLP block을 나눌 그룹 개수입니다 (1B: 1, 2, 4, 8, 16, 32).
 EXPERIMENTS = {
     "exp1": {
         "model": "meta-llama/Llama-3.2-1B",
         "w_bits": 4,
         "a_bits": 4,
         "kv_bits": 4,
-        "layerwise_flag": False,
-        "learning_rate": 1.5,
+        "groupnum": 1,
+        "learning_rate": 15,
     },
     "exp2": {
         "model": "meta-llama/Llama-3.2-1B",
         "w_bits": 4,
         "a_bits": 4,
         "kv_bits": 4,
-        "layerwise_flag": True,
+        "groupnum": 2,
         "learning_rate": 15,
     },
     "exp3": {
         "model": "meta-llama/Llama-3.2-1B",
-        "w_bits": 3,
-        "a_bits": 3,
-        "kv_bits": 3,
-        "layerwise_flag": False,
-        "learning_rate": 1.5,
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "groupnum": 4,
+        "learning_rate": 15,
     },
     "exp4": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "groupnum": 8,
+        "learning_rate": 15,
+    },
+    "exp5": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "groupnum": 16,
+        "learning_rate": 15,
+    },
+    "exp6": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "groupnum": 32,
+        "learning_rate": 15,
+    },
+    "exp7": {
         "model": "meta-llama/Llama-3.2-1B",
         "w_bits": 3,
         "a_bits": 3,
         "kv_bits": 3,
-        "layerwise_flag": True,
+        "groupnum": 1,
         "learning_rate": 15,
     },
+    "exp8": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 3,
+        "a_bits": 3,
+        "kv_bits": 3,
+        "groupnum": 2,
+        "learning_rate": 15,
+    },
+    "exp9": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 3,
+        "a_bits": 3,
+        "kv_bits": 3,
+        "groupnum": 4,
+        "learning_rate": 15,
+    },
+    "exp10": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 3,
+        "a_bits": 3,
+        "kv_bits": 3,
+        "groupnum": 8,
+        "learning_rate": 15,
+    },
+    "exp11": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 3,
+        "a_bits": 3,
+        "kv_bits": 3,
+        "groupnum": 16,
+        "learning_rate": 15,
+    },
+    "exp12": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 3,
+        "a_bits": 3,
+        "kv_bits": 3,
+        "groupnum": 32,
+        "learning_rate": 15,
+    }
 }
 
 TIMING_LOG_FIELDS = {
@@ -94,7 +159,7 @@ TIMING_LOG_FIELDS = {
 TIMING_FIELDS = [field for labels in TIMING_LOG_FIELDS.values() for field in labels.values()]
 
 SUMMARY_FIELDS = [
-    "experiment", "model", "w_bits", "a_bits", "kv_bits", "layerwise_flag",
+    "experiment", "model", "w_bits", "a_bits", "kv_bits", "groupnum",
     "learning_rate", "max_steps", "seed", "status", "final_ppl",
     "started_at", "finished_at", "duration_seconds", *TIMING_FIELDS, "result_dir", "error",
 ]
@@ -131,7 +196,7 @@ def parse_args(argv=None):
 
 
 def conditions(args):
-    required = {"model", "w_bits", "a_bits", "kv_bits", "layerwise_flag", "learning_rate"}
+    required = {"model", "w_bits", "a_bits", "kv_bits", "groupnum", "learning_rate"}
     selected = set(args.experiments) if args.experiments else set(EXPERIMENTS)
     if not selected:
         raise ValueError("EXPERIMENTS is empty; define at least one experiment")
@@ -148,8 +213,8 @@ def conditions(args):
         for field in ("w_bits", "a_bits", "kv_bits"):
             if type(config[field]) is not int or not 2 <= config[field] <= 16:
                 raise ValueError(f"{name}: {field} must be an integer between 2 and 16")
-        if type(config["layerwise_flag"]) is not bool:
-            raise ValueError(f"{name}: layerwise_flag must be True or False, not a string")
+        if type(config["groupnum"]) is not int or config["groupnum"] < 1:
+            raise ValueError(f"{name}: groupnum must be a positive integer")
         rate = config["learning_rate"]
         if type(rate) not in (int, float) or not math.isfinite(rate) or rate <= 0:
             raise ValueError(f"{name}: learning_rate must be a finite positive number")
@@ -187,7 +252,7 @@ def commands(config, directory, args):
         "--save_safetensors", "False", "--seed", str(config["seed"]),
         "--a_bits", str(config["a_bits"]),
         "--k_bits", str(config["kv_bits"]), "--v_bits", str(config["kv_bits"]),
-        "--layerwise" if config["layerwise_flag"] else "--no-layerwise",
+        "--groupnum", str(config["groupnum"]),
         "--w_clip", "--a_asym", "--k_asym", "--v_asym",
         "--k_groupsize", str(args.kv_groupsize), "--v_groupsize", str(args.kv_groupsize),
         "--report_to", "none",

@@ -64,12 +64,20 @@ def parser_gen():
         "--rotate_mode", type=str, default="hadamard", choices=["hadamard", "random"]
     )
 
-    ## resipin argument
-    parser.add_argument(
+    rotation_layout = parser.add_mutually_exclusive_group()
+    rotation_layout.add_argument(
+        "--groupnum",
+        type=int,
+        default=None,
+        help="Number of uniform Attention/MLP rotation groups; must divide 2*num_hidden_layers. "
+             "1 is global, 2*num_hidden_layers is block-wise. The final output shares the last group. "
+             "If omitted, use checkpoint metadata or the legacy global/layerwise layout.",
+    )
+    rotation_layout.add_argument(
         "--layerwise", 
         action=argparse.BooleanOptionalAction, 
         default=False, 
-        help="Use layer-wise A/B rotations instead of global R1.",
+        help="Legacy A/B rotations with an independent final output rotation. Use --groupnum for new experiments.",
     )
     
     parser.add_argument(
@@ -252,6 +260,9 @@ def parser_gen():
     )
 
     args, unknown = parser.parse_known_args()
+
+    if args.groupnum is not None and args.groupnum < 1:
+        parser.error("--groupnum must be positive")
 
     # assert (
     #     args.a_groupsize == args.w_groupsize

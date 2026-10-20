@@ -21,6 +21,7 @@ from utils.hadamard_utils import (
     random_hadamard_matrix,
 )
 from utils.utils import HadamardTransform
+from utils.rotation_groups import checkpoint_groupnum, rotation_group_indices
 
 
 def random_orthogonal_matrix(size, device):
@@ -56,7 +57,7 @@ def rotate_embeddings(model, R1: torch.Tensor) -> None:
     # Rotate the embeddings.
     for W in [model.model.embed_tokens]:
         dtype = W.weight.data.dtype
-        W_ = W.weight.data.to(device="cuda", dtype=torch.float64)
+        W_ = W.weight.data.to(device=R1.device, dtype=torch.float64)
         W.weight.data = torch.matmul(W_, R1).to(device="cpu", dtype=dtype)
 
 
@@ -64,7 +65,7 @@ def rotate_attention_inputs(layer, R1) -> None:
     # Rotate the WQ, WK and WV matrices of the self-attention layer.
     for W in [layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj]:
         dtype = W.weight.dtype
-        W_ = W.weight.to(device="cuda", dtype=torch.float64)
+        W_ = W.weight.to(device=R1.device, dtype=torch.float64)
         W.weight.data = torch.matmul(W_, R1).to(device="cpu", dtype=dtype)
 
 
@@ -73,10 +74,10 @@ def rotate_attention_output(layer, R1) -> None:
     W = layer.self_attn.o_proj
 
     dtype = W.weight.data.dtype
-    W_ = W.weight.data.to(device="cuda", dtype=torch.float64)
+    W_ = W.weight.data.to(device=R1.device, dtype=torch.float64)
     W.weight.data = torch.matmul(R1.T, W_).to(device="cpu", dtype=dtype)
     if W.bias is not None:
-        b = W.bias.data.to(device="cuda", dtype=torch.float64)
+        b = W.bias.data.to(device=R1.device, dtype=torch.float64)
         W.bias.data = torch.matmul(R1.T, b).to(device="cpu", dtype=dtype)
 
 
@@ -85,7 +86,7 @@ def rotate_mlp_input(layer, R1):
     mlp_inputs = [layer.mlp.up_proj, layer.mlp.gate_proj]
     for W in mlp_inputs:
         dtype = W.weight.dtype
-        W_ = W.weight.data.to(device="cuda", dtype=torch.float64)
+        W_ = W.weight.data.to(device=R1.device, dtype=torch.float64)
         W.weight.data = torch.matmul(W_, R1).to(device="cpu", dtype=dtype)
 
 
@@ -93,13 +94,13 @@ def rotate_mlp_output(layer, R1):
     # Rotate the MLP output weights and bias.
     W = layer.mlp.down_proj
     dtype = W.weight.data.dtype
-    W_ = W.weight.data.to(device="cuda", dtype=torch.float64)
+    W_ = W.weight.data.to(device=R1.device, dtype=torch.float64)
     W.weight.data = torch.matmul(R1.T, W_).to(device="cpu", dtype=dtype)
     apply_exact_had_to_linear(
         W, had_dim=-1, output=False
     )  # apply exact (inverse) hadamard on the weights of mlp output
     if W.bias is not None:
-        b = W.bias.data.to(device="cuda", dtype=torch.float64)
+        b = W.bias.data.to(device=R1.device, dtype=torch.float64)
         W.bias.data = torch.matmul(R1.T, b).to(device="cpu", dtype=dtype)
 
 
@@ -107,7 +108,7 @@ def rotate_head(model, R1: torch.Tensor) -> None:
     # Rotate the head.
     W = model.lm_head
     dtype = W.weight.data.dtype
-    W_ = W.weight.data.to(device="cuda", dtype=torch.float64)
+    W_ = W.weight.data.to(device=R1.device, dtype=torch.float64)
     W.weight.data = torch.matmul(W_, R1).to(device="cpu", dtype=dtype)
 
 
@@ -121,15 +122,9 @@ def rotate_ov_proj(layer, head_num, head_dim, R2=None):
 
 @torch.no_grad()
 def rotate_model(model, args):
-
     layerwise = getattr(args, "layerwise", False)
-
-    # R1 = get_orthogonal_matrix(model.config.hidden_size, args.rotate_mode)
-    # get checkpoint for rotation matrices
     if args.optimized_rotation_path is not None:
-        R_cpk = args.optimized_rotation_path
-        checkpoint = torch.load(R_cpk, map_location="cpu")
-        # R1 = torch.load(R_cpk)["R1"].cuda().to(torch.float64)
+        checkpoint = torch.load(args.optimized_rotation_path, map_location="cpu", weights_only=True)
     else:
         checkpoint = None
 
@@ -138,36 +133,38 @@ def rotate_model(model, args):
     model_dim = config.hidden_size
     head_dim = model_dim // num_heads
     num_layers = len(model.model.layers)
-
-    # rotate_embeddings(model, R1)
-    # rotate_head(model, R1)
+    groupnum = checkpoint_groupnum(checkpoint, num_layers, getattr(args, "groupnum", None), layerwise)
+    group_ids = rotation_group_indices(num_layers, groupnum) if groupnum is not None else None
 
     def rotation(key, size):
-        # Get the rotation matrix from the checkpoint if it exists, otherwise generate a new one.
         if checkpoint is not None:
-            return checkpoint[key].to(device="cuda", dtype=torch.float64)
-        return get_orthogonal_matrix(size, args.rotate_mode)
+            value = checkpoint[key]
+            if value.shape != (size, size):
+                raise ValueError(f"Rotation {key} has shape {tuple(value.shape)}, expected {(size, size)}")
+            return value.to(device=utils.DEV, dtype=torch.float64)
+        return get_orthogonal_matrix(size, args.rotate_mode, device=utils.DEV)
 
-    # config.layerwise = layerwise
-    # first residual rotation for the first layer
-    A = rotation("A.0" if layerwise else "R1", model_dim)
+    first_key = "Q.0" if group_ids is not None else ("A.0" if layerwise else "R1")
+    if groupnum == 1 and checkpoint is not None and "R1" in checkpoint:
+        first_key = "R1"  # Legacy global checkpoint.
+    A = rotation(first_key, model_dim)
     rotate_embeddings(model, A)
     utils.cleanup_memory()
 
     layers = [layer for layer in model.model.layers]
     for idx, layer in enumerate(tqdm.tqdm(layers, unit="layer", desc="Rotating")):
-        # if args.optimized_rotation_path is not None:
-        #     key = f"model.layers.{idx}.self_attn.R2"
-        #     R2 = torch.load(R_cpk)[key].cuda().to(torch.float64)
-        # else:
-        #     R2 = get_orthogonal_matrix(head_dim, args.rotate_mode)
-        # rotate_attention_inputs(layers[idx], R1)
-        # rotate_attention_output(layers[idx], R1)
-        # rotate_mlp_input(layers[idx], R1)
-        # rotate_mlp_output(layers[idx], R1)
-        # rotate_ov_proj(layers[idx], num_heads, head_dim, R2=R2)
-        B = rotation(f"B.{idx}", model_dim) if layerwise else A
-        A_next = rotation(f"A.{idx+1}", model_dim) if layerwise else A
+        attn_transition = mlp_transition = layerwise
+        if group_ids is not None:
+            a_group, b_group, next_group = group_ids[2 * idx:2 * idx + 3]
+            attn_transition = a_group != b_group
+            mlp_transition = b_group != next_group
+            # Groups are contiguous, so retain the current matrix and generate/load
+            # a new one only at a boundary. This also shares random rotations.
+            B = rotation(f"Q.{b_group}", model_dim) if attn_transition else A
+            A_next = rotation(f"Q.{next_group}", model_dim) if mlp_transition else B
+        else:
+            B = rotation(f"B.{idx}", model_dim) if layerwise else A
+            A_next = rotation(f"A.{idx+1}", model_dim) if layerwise else A
         R2 = rotation(f"model.layers.{idx}.self_attn.R2", head_dim)
         # rotation fuse
         rotate_attention_inputs(layer, A)
@@ -175,12 +172,10 @@ def rotate_model(model, args):
         rotate_mlp_input(layer, B)
         rotate_mlp_output(layer, A_next)
         rotate_ov_proj(layer, num_heads, head_dim, R2=R2)
-        if layerwise:
-            dtype = layer.self_attn.q_proj.weight.dtype
-            device = layer.self_attn.q_proj.weight.device
-            layer.attn_residual_rotation = (A.T @ B).to(device=device, dtype=dtype)
-            layer.mlp_residual_rotation = (B.T @ A_next).to(device=device, dtype=dtype)
-            # LlamaDecoderLayer.forward will apply the residual rotation to the residual connection
+        dtype = layer.self_attn.q_proj.weight.dtype
+        device = layer.self_attn.q_proj.weight.device
+        layer.attn_residual_rotation = (A.T @ B).to(device=device, dtype=dtype) if attn_transition else None
+        layer.mlp_residual_rotation = (B.T @ A_next).to(device=device, dtype=dtype) if mlp_transition else None
         A = A_next
     # last residual rotation for the head
     rotate_head(model, A)

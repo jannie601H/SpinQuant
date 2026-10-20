@@ -51,6 +51,7 @@ from transformers.utils import (
 from transformers.models.llama.configuration_llama import LlamaConfig
 
 from train_utils.quant_linear import QuantizeLinear
+from utils.rotation_groups import rotation_group_indices
 
 
 logger = logging.get_logger(__name__)
@@ -845,6 +846,8 @@ class LlamaDecoderLayer(nn.Module):
         A=None,
         B=None,
         A_next=None,
+        attn_rotation_transition=True,
+        mlp_rotation_transition=True,
         **kwargs,
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
@@ -875,7 +878,7 @@ class LlamaDecoderLayer(nn.Module):
 
         # basis transition from Attention input to MLP input
         # upcasting to float64 in rotation multiplication and downcasting to original residual dtype
-        if A is not None:
+        if A is not None and attn_rotation_transition:
             residual = (residual.to(torch.float64) @ (A.T.to(torch.float64) @ B.to(torch.float64))).to(residual.dtype)
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -901,7 +904,7 @@ class LlamaDecoderLayer(nn.Module):
 
         # basis transition from MLP input to next Attention input
         # upcasting to float64 in rotation multiplication and downcasting to original residual dtype
-        if B is not None:
+        if B is not None and mlp_rotation_transition:
             residual = (residual.to(torch.float64) @ (B.T.to(torch.float64) @ A_next.to(torch.float64))).to(residual.dtype)
 
         # Fully Connected
@@ -1095,6 +1098,7 @@ class LlamaModel(LlamaPreTrainedModel):
         R1=None,
         As=None,
         Bs=None,
+        rotation_group_ids=None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
             output_attentions
@@ -1180,8 +1184,13 @@ class LlamaModel(LlamaPreTrainedModel):
         for layer_idx, decoder_layer in enumerate(self.layers):
             A = As[layer_idx] if As is not None else None
             B = Bs[layer_idx] if Bs is not None else None
-            # last layer does not have next A, so we set it to None
             A_next = As[layer_idx + 1] if As is not None and layer_idx + 1 < len(As) else None
+            # Use group IDs, not tensor identity: checkpointing can recreate tensors.
+            attn_transition = mlp_transition = True
+            if rotation_group_ids is not None:
+                a_group, b_group, next_group = rotation_group_ids[2 * layer_idx:2 * layer_idx + 3]
+                attn_transition = a_group != b_group
+                mlp_transition = b_group != next_group
 
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -1201,6 +1210,8 @@ class LlamaModel(LlamaPreTrainedModel):
                     A,
                     B,
                     A_next,
+                    attn_transition,
+                    mlp_transition,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -1216,6 +1227,8 @@ class LlamaModel(LlamaPreTrainedModel):
                     A=A,
                     B=B,
                     A_next=A_next,
+                    attn_rotation_transition=attn_transition,
+                    mlp_rotation_transition=mlp_transition,
                 )
 
             hidden_states = layer_outputs[0]
@@ -1335,9 +1348,18 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         self.R1 = None
         self.A = None
         self.B = None
+        self.Q = None
+        self.rotation_group_ids = None
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    def set_group_rotations(self, rotations):
+        """Own one module per group; A/B are only tensor references at forward time."""
+        if any(rotation is not None for rotation in (self.R1, self.A, self.B)):
+            raise ValueError("Grouped rotations cannot be combined with legacy R1/A/B rotations")
+        self.rotation_group_ids = rotation_group_indices(self.config.num_hidden_layers, len(rotations))
+        self.Q = nn.ModuleList(rotations)
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
@@ -1423,6 +1445,9 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         As = [rotation.weight for rotation in self.A] if self.A is not None else None
         Bs = [rotation.weight for rotation in self.B] if self.B is not None else None
         R1 = self.R1.weight if self.R1 is not None else None
+        if self.Q is not None:
+            rotations = [self.Q[group].weight for group in self.rotation_group_ids]
+            As, Bs = rotations[::2], rotations[1::2]
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
@@ -1438,7 +1463,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             R1=R1,
             As=As,
             Bs=Bs,
-            # R1=self.R1.weight,
+            rotation_group_ids=self.rotation_group_ids,
         )
 
         hidden_states = outputs[0]
