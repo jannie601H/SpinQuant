@@ -21,7 +21,7 @@ from utils.hadamard_utils import (
     random_hadamard_matrix,
 )
 from utils.utils import HadamardTransform
-from utils.rotation_groups import checkpoint_groupnum, rotation_group_indices
+from utils.rotation_groups import checkpoint_group_indices
 
 
 def random_orthogonal_matrix(size, device):
@@ -133,8 +133,10 @@ def rotate_model(model, args):
     model_dim = config.hidden_size
     head_dim = model_dim // num_heads
     num_layers = len(model.model.layers)
-    groupnum = checkpoint_groupnum(checkpoint, num_layers, getattr(args, "groupnum", None), layerwise)
-    group_ids = rotation_group_indices(num_layers, groupnum) if groupnum is not None else None
+    group_ids = checkpoint_group_indices(
+        checkpoint, num_layers, getattr(args, "groupnum", None), layerwise,
+        getattr(args, "group_boundaries", None))
+    groupnum = group_ids[-1] + 1 if group_ids is not None else None
 
     def rotation(key, size):
         if checkpoint is not None:

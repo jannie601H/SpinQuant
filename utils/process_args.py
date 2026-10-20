@@ -13,6 +13,7 @@ from typing import Optional, Tuple
 
 import argparse
 import transformers
+from utils.rotation_groups import validate_group_boundaries
 
 
 @dataclass
@@ -65,6 +66,12 @@ def parser_gen():
     )
 
     rotation_layout = parser.add_mutually_exclusive_group()
+    rotation_layout.add_argument(
+        "--group_boundaries", type=int, nargs="*", default=None, metavar="BLOCK",
+        help="Zero-based Attention/MLP block indices AFTER which to split, in increasing order. "
+             "Example: --group_boundaries 3 4 5 creates four groups. "
+             "An empty list creates one group; final output shares the last group.",
+    )
     rotation_layout.add_argument(
         "--groupnum",
         type=int,
@@ -263,6 +270,11 @@ def parser_gen():
 
     if args.groupnum is not None and args.groupnum < 1:
         parser.error("--groupnum must be positive")
+    if args.group_boundaries is not None:
+        try:
+            validate_group_boundaries(args.group_boundaries)
+        except ValueError as error:
+            parser.error(str(error))
 
     # assert (
     #     args.a_groupsize == args.w_groupsize

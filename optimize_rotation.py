@@ -53,8 +53,10 @@ def train() -> None:
     config = transformers.AutoConfig.from_pretrained(
         model_args.input_model, token=model_args.access_token
     )
-    if ptq_args.groupnum is not None:
-        rotation_group_indices(config.num_hidden_layers, ptq_args.groupnum)
+    group_ids = None
+    if ptq_args.groupnum is not None or ptq_args.group_boundaries is not None:
+        group_ids = rotation_group_indices(
+            config.num_hidden_layers, ptq_args.groupnum, ptq_args.group_boundaries)
 
     # Llama v3.2 specific: Spinquant is not compatiable with tie_word_embeddings, clone lm_head from embed_tokens
     process_word_embeddings = False
@@ -76,12 +78,13 @@ def train() -> None:
         param.requires_grad = False
     R1 = random_hadamard_matrix(model.config.hidden_size, "cuda")
 
-    if ptq_args.groupnum is not None:
+    if group_ids is not None:
         model.set_group_rotations([
-            RotateModule(R1.clone()) for _ in range(ptq_args.groupnum)
-        ])
-        log.info("Rotation groups: %s groups, %s blocks per group; final output shares the last group",
-                 ptq_args.groupnum, 2 * config.num_hidden_layers // ptq_args.groupnum)
+            RotateModule(R1.clone()) for _ in range(group_ids[-1] + 1)
+        ], group_boundaries=ptq_args.group_boundaries)
+        log.info("Rotation groups: %s groups, block counts %s; final output shares the last group",
+                 group_ids[-1] + 1,
+                 [group_ids[:-1].count(g) for g in range(group_ids[-1] + 1)])
     elif ptq_args.layerwise:
         # A need 1 more than the number of layers, since the last layer does not have next A
         model.A = nn.ModuleList([
@@ -177,8 +180,9 @@ def train() -> None:
             or re.search(r"(?:^|\.)[ABQ]\.\d+\.weight$", key)
         )
     }
-    if ptq_args.groupnum is not None:
-        R_dict[METADATA_KEY] = rotation_group_metadata(config.num_hidden_layers, ptq_args.groupnum)
+    if group_ids is not None:
+        R_dict[METADATA_KEY] = rotation_group_metadata(
+            config.num_hidden_layers, ptq_args.groupnum, ptq_args.group_boundaries)
     if local_rank == 0:
         os.makedirs(model_args.output_rotation_path, exist_ok=True)
         path = os.path.join(model_args.output_rotation_path, "R.bin")
