@@ -50,11 +50,15 @@ MAX_STEPS = 100
 RUN_TIMEZONE = timezone(timedelta(hours=9), "KST")
 
 # 실행할 실험을 아래에 직접 정의합니다. 각 항목은 한 번씩, 작성 순서대로 실행됩니다.
-# 아래 exp1~exp3은 편집용 예시입니다. 항목을 복사해 exp4 등을 추가할 수 있습니다.
+# exp2~exp5, exp8~exp11은 rotation similarity 기반 비균등 grouping 실험입니다.
+# analysis/rotation_similarity_three_runs/boundary_comparison의 원본 group_candidates.json에서
+# 정밀도·G별로 173633, 144201, 131536 중 2개 이상 실행이 선택한 경계를 사용합니다.
+# 4-bit G=16 후보는 조건을 만족하는 경계가 16개이므로 exp5는 실제 17개 group입니다.
+# exp1/exp7은 global, exp6/exp12는 32개 group 기준 실험입니다.
 # model은 Hugging Face 모델 ID 또는 로컬 모델 디렉터리입니다.
 # groupnum은 Attention/MLP block을 나눌 그룹 개수입니다 (1B: 1, 2, 4, 8, 16, 32).
 # groupnum 대신 layerwise를 지정할 수 있습니다: True는 기존 full layer-wise, False는 global.
-# group_boundaries로 비균등 grouping도 가능합니다. 예: [3, 4, 5] -> 4개 group.
+# group_boundaries로 비균등 grouping도 가능합니다. 예: [3, 4, 5] -> 4개 group, 해당 block 뒤에서 boundary 설정.
 # 경계는 0-based Attention/MLP block 뒤의 위치입니다. []는 하나의 group입니다.
 # groupnum, layerwise, group_boundaries 중 정확히 하나만 지정해야 합니다.
 EXPERIMENTS = {
@@ -71,7 +75,7 @@ EXPERIMENTS = {
         "w_bits": 4,
         "a_bits": 4,
         "kv_bits": 4,
-        "groupnum": 2,
+        "group_boundaries": [3],
         "learning_rate": 15,
     },
     "exp3": {
@@ -79,7 +83,7 @@ EXPERIMENTS = {
         "w_bits": 4,
         "a_bits": 4,
         "kv_bits": 4,
-        "groupnum": 4,
+        "group_boundaries": [3, 4, 5],
         "learning_rate": 15,
     },
     "exp4": {
@@ -87,7 +91,7 @@ EXPERIMENTS = {
         "w_bits": 4,
         "a_bits": 4,
         "kv_bits": 4,
-        "groupnum": 8,
+        "group_boundaries": [1, 2, 3, 4, 5, 6, 8],
         "learning_rate": 15,
     },
     "exp5": {
@@ -95,7 +99,7 @@ EXPERIMENTS = {
         "w_bits": 4,
         "a_bits": 4,
         "kv_bits": 4,
-        "groupnum": 16,
+        "group_boundaries": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 18, 20, 25, 26],
         "learning_rate": 15,
     },
     "exp6": {
@@ -119,7 +123,7 @@ EXPERIMENTS = {
         "w_bits": 3,
         "a_bits": 3,
         "kv_bits": 3,
-        "groupnum": 2,
+        "group_boundaries": [3],
         "learning_rate": 15,
     },
     "exp9": {
@@ -127,7 +131,7 @@ EXPERIMENTS = {
         "w_bits": 3,
         "a_bits": 3,
         "kv_bits": 3,
-        "groupnum": 4,
+        "group_boundaries": [1, 3, 4],
         "learning_rate": 15,
     },
     "exp10": {
@@ -135,7 +139,7 @@ EXPERIMENTS = {
         "w_bits": 3,
         "a_bits": 3,
         "kv_bits": 3,
-        "groupnum": 8,
+        "group_boundaries": [0, 1, 2, 3, 4, 5, 6],
         "learning_rate": 15,
     },
     "exp11": {
@@ -143,7 +147,7 @@ EXPERIMENTS = {
         "w_bits": 3,
         "a_bits": 3,
         "kv_bits": 3,
-        "groupnum": 16,
+        "group_boundaries": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 18, 19, 20],
         "learning_rate": 15,
     },
     "exp12": {
