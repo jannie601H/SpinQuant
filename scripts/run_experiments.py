@@ -20,6 +20,8 @@ optimize_rotation.py still saves its final R.bin. Step losses stay in train.log.
 Other training/evaluation defaults follow 10_optimize_rotation.sh/2_eval_ptq.sh.
 Rotation training always uses W16; evaluation uses the configured weight bits
 with GPTQ (weight quantization is skipped for W16 evaluation).
+--no-rotate skips rotation training and evaluates without an R.bin checkpoint.
+Like ptq.py --no-rotate, this still uses Q/K Hadamard rotation when kv_bits < 16.
 --capture-activation-stats saves scale, x_norm, and error_norm for every layer's
 attention/FFN input in each experiment's activation_stats/ directory. Collection
 runs during evaluation only; evaluation timing then includes collection costs.
@@ -52,38 +54,19 @@ RUN_TIMEZONE = timezone(timedelta(hours=9), "KST")
 # 아래 exp1~exp3은 편집용 예시입니다. 항목을 복사해 exp4 등을 추가할 수 있습니다.
 # model은 Hugging Face 모델 ID 또는 로컬 모델 디렉터리입니다.
 # layerwise_flag에는 문자열이 아닌 Python의 True / False를 사용합니다.
+# --no-rotate 실행 시 layerwise_flag와 learning_rate는 생략할 수 있습니다.
 EXPERIMENTS = {
     "exp1": {
         "model": "meta-llama/Llama-3.2-1B",
         "w_bits": 4,
         "a_bits": 4,
         "kv_bits": 4,
-        "layerwise_flag": False,
-        "learning_rate": 15,
     },
     "exp2": {
         "model": "meta-llama/Llama-3.2-1B",
-        "w_bits": 4,
-        "a_bits": 4,
-        "kv_bits": 4,
-        "layerwise_flag": True,
-        "learning_rate": 15,
-    },
-    "exp3": {
-        "model": "meta-llama/Llama-3.2-1B",
         "w_bits": 3,
         "a_bits": 3,
         "kv_bits": 3,
-        "layerwise_flag": False,
-        "learning_rate": 15,
-    },
-    "exp4": {
-        "model": "meta-llama/Llama-3.2-1B",
-        "w_bits": 3,
-        "a_bits": 3,
-        "kv_bits": 3,
-        "layerwise_flag": True,
-        "learning_rate": 15,
     },
 }
 
@@ -98,7 +81,7 @@ TIMING_FIELDS = [field for labels in TIMING_LOG_FIELDS.values() for field in lab
 
 SUMMARY_FIELDS = [
     "experiment", "model", "w_bits", "a_bits", "kv_bits", "layerwise_flag",
-    "learning_rate", "max_steps", "seed", "status", "final_ppl",
+    "learning_rate", "max_steps", "seed", "rotate", "status", "final_ppl",
     "started_at", "finished_at", "duration_seconds", *TIMING_FIELDS, "result_dir", "error",
 ]
 
@@ -123,6 +106,10 @@ def parse_args(argv=None):
     )
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running or writing files")
     parser.add_argument(
+        "--no-rotate", dest="rotate", action="store_false",
+        help="Skip rotation training and evaluate without learned rotations; Q/K Hadamard remains when kv_bits < 16",
+    )
+    parser.add_argument(
         "--capture-activation-stats", action="store_true",
         help="Save per-token activation quantization statistics during evaluation",
     )
@@ -138,7 +125,11 @@ def parse_args(argv=None):
 
 
 def conditions(args):
-    required = {"model", "w_bits", "a_bits", "kv_bits", "layerwise_flag", "learning_rate"}
+    required = {"model", "w_bits", "a_bits", "kv_bits"}
+    rotation_fields = {"layerwise_flag", "learning_rate"}
+    allowed = required | rotation_fields
+    if args.rotate:
+        required |= rotation_fields
     selected = set(args.experiments) if args.experiments else set(EXPERIMENTS)
     if not selected:
         raise ValueError("EXPERIMENTS is empty; define at least one experiment")
@@ -147,9 +138,14 @@ def conditions(args):
             continue
         if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", name):
             raise ValueError(f"Invalid experiment name {name!r}; use 1-32 letters, digits, '-' or '_'")
-        if not isinstance(definition, dict) or set(definition) != required:
-            raise ValueError(f"{name}: specify exactly these fields: {', '.join(sorted(required))}")
-        config = dict(definition, name=name, max_steps=MAX_STEPS, seed=args.seed)
+        if (not isinstance(definition, dict)
+                or not required <= set(definition) <= allowed):
+            raise ValueError(
+                f"{name}: required fields: {', '.join(sorted(required))}; "
+                f"allowed fields: {', '.join(sorted(allowed))}"
+            )
+        config = dict(definition, name=name, max_steps=MAX_STEPS, seed=args.seed,
+                      rotate=args.rotate)
         if not isinstance(config["model"], str) or not config["model"].strip():
             raise ValueError(f"{name}: model must be a nonempty model ID or directory")
         for field in ("w_bits", "a_bits", "kv_bits"):
@@ -157,11 +153,12 @@ def conditions(args):
                 raise ValueError(f"{name}: {field} must be an integer between 2 and 16")
         if args.capture_activation_stats and config["a_bits"] >= 16:
             raise ValueError(f"{name}: activation statistics require a_bits < 16")
-        if type(config["layerwise_flag"]) is not bool:
+        if "layerwise_flag" in config and type(config["layerwise_flag"]) is not bool:
             raise ValueError(f"{name}: layerwise_flag must be True or False, not a string")
-        rate = config["learning_rate"]
-        if type(rate) not in (int, float) or not math.isfinite(rate) or rate <= 0:
-            raise ValueError(f"{name}: learning_rate must be a finite positive number")
+        if "learning_rate" in config:
+            rate = config["learning_rate"]
+            if type(rate) not in (int, float) or not math.isfinite(rate) or rate <= 0:
+                raise ValueError(f"{name}: learning_rate must be a finite positive number")
         if Path(config["model"]).is_dir():
             config["model"] = str(Path(config["model"]).resolve())
         yield config
@@ -196,36 +193,40 @@ def commands(config, directory, args):
         "--save_safetensors", "False", "--seed", str(config["seed"]),
         "--a_bits", str(config["a_bits"]),
         "--k_bits", str(config["kv_bits"]), "--v_bits", str(config["kv_bits"]),
-        "--layerwise" if config["layerwise_flag"] else "--no-layerwise",
         "--w_clip", "--a_asym", "--k_asym", "--v_asym",
         "--k_groupsize", str(args.kv_groupsize), "--v_groupsize", str(args.kv_groupsize),
         "--report_to", "none",
     ]
-    train = launcher + [str(ROOT / "optimize_rotation.py")] + common + [
-        "--w_bits", "16",
-        "--output_rotation_path", str(directory),
-        "--output_dir", str(directory / "output"),
-        "--logging_dir", str(directory / "logs"),
-        "--log_on_each_node", "False", "--per_device_train_batch_size", "1",
-        "--logging_steps", "1", "--learning_rate", str(config["learning_rate"]),
-        "--weight_decay", "0.", "--lr_scheduler_type", "cosine",
-        "--gradient_checkpointing", "True", "--max_steps", str(MAX_STEPS),
-        "--save_strategy", "no", "--disable_tqdm", "True",
-    ]
+    if config["rotate"]:
+        common += ["--layerwise" if config["layerwise_flag"] else "--no-layerwise"]
+        train = launcher + [str(ROOT / "optimize_rotation.py")] + common + [
+            "--w_bits", "16",
+            "--output_rotation_path", str(directory),
+            "--output_dir", str(directory / "output"),
+            "--logging_dir", str(directory / "logs"),
+            "--log_on_each_node", "False", "--per_device_train_batch_size", "1",
+            "--logging_steps", "1", "--learning_rate", str(config["learning_rate"]),
+            "--weight_decay", "0.", "--lr_scheduler_type", "cosine",
+            "--gradient_checkpointing", "True", "--max_steps", str(MAX_STEPS),
+            "--save_strategy", "no", "--disable_tqdm", "True",
+        ]
     evaluate = launcher + [str(ROOT / "ptq.py")] + common + [
         "--w_bits", str(config["w_bits"]), "--no-w_rtn",
         "--output_dir", str(directory / "eval_output"),
         "--logging_dir", str(directory / "eval_logs"),
         "--do_train", "False", "--do_eval", "True",
         "--per_device_eval_batch_size", str(args.eval_batch_size),
-        "--rotate", "--optimized_rotation_path", str(directory / "R.bin"),
     ]
+    if config["rotate"]:
+        evaluate += ["--rotate", "--optimized_rotation_path", str(directory / "R.bin")]
+    else:
+        evaluate += ["--no-rotate"]
     if args.capture_activation_stats:
         evaluate += [
             "--capture_activation_stats",
             "--activation_stats_dir", str(directory / "activation_stats"),
         ]
-    return {"train": train, "eval": evaluate}
+    return {"train": train, "eval": evaluate} if config["rotate"] else {"eval": evaluate}
 
 
 def now():
@@ -352,7 +353,8 @@ def run_experiment(config, directory, args, version):
     started = time.monotonic()
     result = {
         "experiment": config["name"], "conditions": config,
-        "status": "training", "final_ppl": None, "error": None,
+        "status": "training" if config["rotate"] else "evaluating",
+        "final_ppl": None, "error": None,
         "started_at": now(), "finished_at": None, "duration_seconds": None,
         **dict.fromkeys(TIMING_FIELDS),
         "result_dir": str(directory), "rotation_path": None,
@@ -375,16 +377,17 @@ def run_experiment(config, directory, args, version):
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
     }
     write_result(directory, result)
-    stage = "train"
+    stage = "train" if config["rotate"] else "eval"
     try:
-        code = run_stage(result["commands"][stage], directory / "train.log", stage)
-        result["return_codes"][stage] = code
-        if code != 0:
-            raise RuntimeError(f"Training exited with code {code}; see train.log")
-        rotation = directory / "R.bin"
-        if not rotation.is_file() or rotation.stat().st_size == 0:
-            raise RuntimeError("Training completed without a nonempty R.bin; see train.log")
-        result["rotation_path"] = str(rotation)
+        if config["rotate"]:
+            code = run_stage(result["commands"][stage], directory / "train.log", stage)
+            result["return_codes"][stage] = code
+            if code != 0:
+                raise RuntimeError(f"Training exited with code {code}; see train.log")
+            rotation = directory / "R.bin"
+            if not rotation.is_file() or rotation.stat().st_size == 0:
+                raise RuntimeError("Training completed without a nonempty R.bin; see train.log")
+            result["rotation_path"] = str(rotation)
         stage = "eval"
         result["status"] = "evaluating"
         result.update(read_timings(directory))
