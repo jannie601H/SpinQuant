@@ -2,11 +2,22 @@
 """Extract one WikiText2 sequence's FP activations without rotation, PTQ or PPL."""
 
 import argparse
+from contextlib import contextmanager
+import faulthandler
 from pathlib import Path
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+
+@contextmanager
+def stage(name):
+    started = time.perf_counter()
+    print(f"[FP capture] START {name}", flush=True)
+    yield
+    print(f"[FP capture] DONE  {name} ({time.perf_counter() - started:.2f}s)", flush=True)
 
 
 def parse_args(argv=None):
@@ -32,6 +43,7 @@ def main(argv=None):
     args = parse_args(argv)
     if args.output_dir.exists():
         raise FileExistsError(f"Use a fresh output directory: {args.output_dir}")
+    print("[FP capture] Importing dependencies", flush=True)
     import torch
     import transformers
     from transformers import AutoConfig, LlamaTokenizerFast
@@ -40,23 +52,36 @@ def main(argv=None):
     from utils.fp_activation_capture import capture_fp_activations, select_sequence
 
     transformers.set_seed(args.seed)
-    config = AutoConfig.from_pretrained(args.input_model)
+    print(f"[FP capture] Requested device={args.device}, dtype={args.dtype}; "
+          f"CUDA available={torch.cuda.is_available()}", flush=True)
+    if torch.device(args.device).type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but is unavailable in this Python environment")
+    with stage("load model config"):
+        config = AutoConfig.from_pretrained(args.input_model)
     if getattr(config, "quantization_config", None):
         raise ValueError("Use an original, unquantized model checkpoint")
-    tokenizer = LlamaTokenizerFast.from_pretrained(
-        args.input_model, model_max_length=args.sequence_length,
-        padding_side="right", add_eos_token=False, add_bos_token=False,
-    )
-    encoding = data_utils.get_wikitext2(tokenizer=tokenizer, eval_mode=True)
+    with stage("load tokenizer"):
+        tokenizer = LlamaTokenizerFast.from_pretrained(
+            args.input_model, model_max_length=args.sequence_length,
+            padding_side="right", add_eos_token=False, add_bos_token=False,
+        )
+    with stage("load WikiText2 and tokenize test stream (CPU/network)"):
+        encoding = data_utils.get_wikitext2(tokenizer=tokenizer, eval_mode=True)
     input_ids, selection = select_sequence(
         encoding.input_ids, args.sequence_length, args.seed, args.sequence_index,
     )
     del encoding
+    print(f"[FP capture] Selected sequence={selection['source_sequence_index']}, "
+          f"tokens={input_ids.shape[1]}", flush=True)
     # Load fresh weights and call the decoder backbone directly. Never call
     # ptq_model/prepare_model or fuse_layer_norms in this extraction path.
-    model = LlamaForCausalLM.from_pretrained(
-        args.input_model, config=config, torch_dtype=getattr(torch, args.dtype),
-    ).to(args.device).eval()
+    with stage("load model weights (CPU/network)"):
+        model = LlamaForCausalLM.from_pretrained(
+            args.input_model, config=config, torch_dtype=getattr(torch, args.dtype),
+        )
+    with stage(f"move model to {args.device}"):
+        model = model.to(args.device).eval()
+    print(f"[FP capture] Actual model device={model.model.embed_tokens.weight.device}", flush=True)
     manifest = capture_fp_activations(model, input_ids, args.output_dir, metadata={
         **selection, "model": args.input_model, "tokenizer": tokenizer.name_or_path,
         "model_revision": getattr(model.config, "_commit_hash", None),
@@ -72,4 +97,11 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Emit diagnostic stacks even during blocking downloads/file locks. This
+    # neither cancels the run nor changes model computations.
+    faulthandler.enable()
+    faulthandler.dump_traceback_later(300, repeat=True)
+    try:
+        raise SystemExit(main())
+    finally:
+        faulthandler.cancel_dump_traceback_later()

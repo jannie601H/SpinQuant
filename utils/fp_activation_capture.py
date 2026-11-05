@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import random
+import time
 
 import torch
 
@@ -87,6 +88,7 @@ def capture_fp_activations(model, input_ids, output_dir, metadata=None):
         "w_bits": 16, "a_bits": 16, "k_bits": 16, "v_bits": 16,
         "activation_basis": "original channels, post-RMSNorm with gamma retained",
         "activation_dtype": str(model.model.embed_tokens.weight.dtype),
+        "model_device": str(model.model.embed_tokens.weight.device),
         "statistics_dtype": "torch.float32",
         "statistics_scope": "all tokens of the single saved sequence",
         "padding": False, "use_cache": False,
@@ -107,6 +109,7 @@ def capture_fp_activations(model, input_ids, output_dir, metadata=None):
 
     def make_hook(layer_index, site):
         def hook(module, inputs):
+            started = time.perf_counter()
             key = (layer_index, site)
             if key in seen:
                 raise RuntimeError(f"Duplicate activation capture: {key}")
@@ -114,6 +117,8 @@ def capture_fp_activations(model, input_ids, output_dir, metadata=None):
             expected = (1, token_ids.shape[1], module.in_features)
             if tuple(x.shape) != expected:
                 raise RuntimeError(f"{key}: expected {expected}, got {tuple(x.shape)}")
+            print(f"[FP capture] Layer {layer_index} {site}: input on {x.device}; "
+                  "copying to CPU, computing statistics and saving", flush=True)
             raw = x[0].to(device="cpu").clone()
             values = raw.float()
             if not torch.isfinite(values).all():
@@ -133,6 +138,8 @@ def capture_fp_activations(model, input_ids, output_dir, metadata=None):
                 "activation_dtype": str(raw.dtype), "x": raw, **stats,
             }, directory / f"layer_{layer_index:03d}_{site}.pt")
             seen.add(key)
+            print(f"[FP capture] Layer {layer_index} {site}: saved "
+                  f"({time.perf_counter() - started:.2f}s)", flush=True)
             # Returning None preserves the Linear input.
         return hook
 
@@ -143,7 +150,11 @@ def capture_fp_activations(model, input_ids, output_dir, metadata=None):
             for site, projection in (("attn", layer.self_attn.q_proj), ("ffn", layer.mlp.gate_proj)):
                 handles.append(projection.register_forward_pre_hook(make_hook(index, site)))
         device = model.model.embed_tokens.weight.device
+        started = time.perf_counter()
+        print(f"[FP capture] START single-sequence backbone forward on {device}", flush=True)
         model.model(input_ids=token_ids.to(device), use_cache=False)
+        print(f"[FP capture] DONE backbone forward and saves "
+              f"({time.perf_counter() - started:.2f}s)", flush=True)
         expected_sites = {(index, site) for index in range(len(layers)) for site in ("attn", "ffn")}
         if seen != expected_sites:
             raise RuntimeError(f"Missing activation hooks: {sorted(expected_sites - seen)}")
