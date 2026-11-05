@@ -21,10 +21,15 @@ Other training/evaluation defaults follow 10_optimize_rotation.sh/2_eval_ptq.sh.
 Rotation training always uses W16; evaluation uses the configured weight bits
 with GPTQ (weight quantization is skipped for W16 evaluation).
 --no-rotate skips rotation training and evaluates without an R.bin checkpoint.
-Like ptq.py --no-rotate, this still uses Q/K Hadamard rotation when kv_bits < 16.
+Like ptq.py --no-rotate, this disables Q/K Hadamard as well, retaining KV
+quantization and the model's positional RoPE. RMSNorm scales remain unfused.
 --capture-activation-stats saves scale, x_norm, and error_norm for every layer's
-attention/FFN input in each experiment's activation_stats/ directory. Collection
+attention/FFN input in each experiment's activation_stats/ directory, plus full
+pre/post-quantization activations for one seed-selected sequence at every site. Collection
 runs during evaluation only; evaluation timing then includes collection costs.
+--capture-fp-activations instead runs only one unpadded sequence through a fresh
+FP backbone. It forces no rotation and W/A/K/V16, skips training/PTQ/PPL, and
+saves raw activations and max/RMS statistics under fp_activations/.
 The existing parser consumes --seed for rotation initialization and PTQ; the
 Trainer's separate seed remains its existing default of 42.
 """
@@ -81,7 +86,7 @@ TIMING_FIELDS = [field for labels in TIMING_LOG_FIELDS.values() for field in lab
 
 SUMMARY_FIELDS = [
     "experiment", "model", "w_bits", "a_bits", "kv_bits", "layerwise_flag",
-    "learning_rate", "max_steps", "seed", "rotate", "status", "final_ppl",
+    "learning_rate", "max_steps", "seed", "rotate", "norm_fused", "qk_hadamard", "capture_mode", "status", "final_ppl",
     "started_at", "finished_at", "duration_seconds", *TIMING_FIELDS, "result_dir", "error",
 ]
 
@@ -107,13 +112,21 @@ def parse_args(argv=None):
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running or writing files")
     parser.add_argument(
         "--no-rotate", dest="rotate", action="store_false",
-        help="Skip rotation training and evaluate without learned rotations; Q/K Hadamard remains when kv_bits < 16",
+        help="Skip rotation training, RMSNorm fusion, and all SpinQuant rotations (including Q/K Hadamard); retain quantization and RoPE",
     )
     parser.add_argument(
         "--capture-activation-stats", action="store_true",
-        help="Save per-token activation quantization statistics during evaluation",
+        help="Save per-token quantization statistics and one sequence's full activations during evaluation",
+    )
+    parser.add_argument(
+        "--capture-fp-activations", action="store_true",
+        help="Capture one FP sequence; override bit widths to 16 and disable rotation, training, PTQ and PPL",
     )
     args = parser.parse_args(argv)
+    if args.capture_fp_activations:
+        if args.capture_activation_stats:
+            parser.error("Choose --capture-fp-activations or --capture-activation-stats, not both")
+        args.rotate = False
     if not 0 <= args.seed < 2**32:
         parser.error("--seed must be between 0 and 2**32 - 1")
     if args.eval_batch_size < 1:
@@ -145,12 +158,15 @@ def conditions(args):
                 f"allowed fields: {', '.join(sorted(allowed))}"
             )
         config = dict(definition, name=name, max_steps=MAX_STEPS, seed=args.seed,
-                      rotate=args.rotate)
+                      rotate=args.rotate, norm_fused=args.rotate)
         if not isinstance(config["model"], str) or not config["model"].strip():
             raise ValueError(f"{name}: model must be a nonempty model ID or directory")
         for field in ("w_bits", "a_bits", "kv_bits"):
             if type(config[field]) is not int or not 2 <= config[field] <= 16:
                 raise ValueError(f"{name}: {field} must be an integer between 2 and 16")
+        if args.capture_fp_activations:
+            config.update(w_bits=16, a_bits=16, kv_bits=16, capture_mode="fp_single_sequence")
+        config["qk_hadamard"] = args.rotate and config["kv_bits"] < 16
         if args.capture_activation_stats and config["a_bits"] >= 16:
             raise ValueError(f"{name}: activation statistics require a_bits < 16")
         if "layerwise_flag" in config and type(config["layerwise_flag"]) is not bool:
@@ -184,6 +200,14 @@ def create_run_directory(results_dir, dry_run=False):
 
 
 def commands(config, directory, args):
+    if config.get("capture_mode") == "fp_single_sequence":
+        return {"eval": [
+            sys.executable, str(ROOT / "scripts/capture_fp_activations.py"),
+            "--input-model", config["model"],
+            "--output-dir", str(directory / "fp_activations"),
+            "--seed", str(config["seed"]),
+            "--sequence-length", "2048", "--dtype", "bfloat16",
+        ]}
     # Use this interpreter for both torchrun and its worker, so the active
     # environment supplies all dependencies. --standalone allocates a free port.
     launcher = [sys.executable, "-m", "torch.distributed.run", "--standalone", "--nnodes=1", "--nproc_per_node=1"]
@@ -350,6 +374,7 @@ def read_timings(directory):
 
 def run_experiment(config, directory, args, version):
     directory.mkdir(parents=True, exist_ok=False)
+    capture_fp = config.get("capture_mode") == "fp_single_sequence"
     started = time.monotonic()
     result = {
         "experiment": config["name"], "conditions": config,
@@ -363,9 +388,11 @@ def run_experiment(config, directory, args, version):
         "evaluation": {
             "dataset": "Salesforce/wikitext", "subset": "wikitext-2-raw-v1",
             "split": "test", "sequence_length": 2048,
-            "batch_size": args.eval_batch_size,
+            "batch_size": 1 if capture_fp else args.eval_batch_size,
+            "ppl_evaluated": not capture_fp,
             "weight_quantization": "gptq" if config["w_bits"] < 16 else "none",
-            "calibration_samples": 128,
+            "calibration_samples": 0 if capture_fp or config["w_bits"] >= 16 else 128,
+            "fp_activations_dir": str(directory / "fp_activations") if capture_fp else None,
             "activation_stats_dir": (
                 str(directory / "activation_stats")
                 if args.capture_activation_stats else None
@@ -396,7 +423,13 @@ def run_experiment(config, directory, args, version):
         result["return_codes"][stage] = code
         if code != 0:
             raise RuntimeError(f"Evaluation exited with code {code}; see eval.log")
-        result["final_ppl"] = read_ppl(directory / "eval.log")
+        if capture_fp:
+            manifest_path = directory / "fp_activations" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            if manifest.get("status") != "complete" or manifest.get("capture_mode") != "fp_single_sequence":
+                raise ValueError("FP activation collection did not complete")
+        else:
+            result["final_ppl"] = read_ppl(directory / "eval.log")
         result["status"] = "success"
     except KeyboardInterrupt:
         result["status"] = "interrupted"
@@ -410,7 +443,8 @@ def run_experiment(config, directory, args, version):
         result["duration_seconds"] = round(time.monotonic() - started, 3)
         write_result(directory, result)
         append_summary(directory.parent, result)
-    print(f"  {result['status']}: PPL={result['final_ppl']}" + (f"; {result['error']}" if result["error"] else ""), flush=True)
+    detail = "FP activation capture" if capture_fp else f"PPL={result['final_ppl']}"
+    print(f"  {result['status']}: {detail}" + (f"; {result['error']}" if result["error"] else ""), flush=True)
     return result["status"]
 
 
@@ -426,7 +460,8 @@ def main(argv=None):
         return 1
     version = code_version() if not args.dry_run else None
     run_directory = create_run_directory(args.results_dir, dry_run=args.dry_run)
-    print(f"{len(experiments)} experiments; max_steps={MAX_STEPS}; results={run_directory}", flush=True)
+    mode = "FP capture (one sequence; no PTQ/PPL)" if args.capture_fp_activations else f"max_steps={MAX_STEPS}"
+    print(f"{len(experiments)} experiments; {mode}; results={run_directory}", flush=True)
     failed = 0
     for index, config in enumerate(experiments, 1):
         directory = run_directory / config["name"]

@@ -155,6 +155,7 @@ def ptq_model(args, model, model_args=None):
             rope_function_name = "apply_rotary_pos_emb"
             layers = model.model.layers
             k_quant_config = {
+                "rotate": args.rotate,
                 "k_bits": args.k_bits,
                 "k_groupsize": args.k_groupsize,
                 "k_sym": not (args.k_asym),

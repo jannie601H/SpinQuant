@@ -190,12 +190,15 @@ class QKRotationWrapper(torch.nn.Module):
     def __init__(self, func, config, *args, **kwargs):
         super().__init__()
         self.config = config
+        # Quantization does not require the optional Q/K Hadamard transform.
+        self.rotate = kwargs.pop("rotate", True)
         num_heads = config.num_attention_heads
         model_dim = config.hidden_size
         head_dim = model_dim // num_heads
-        assert is_pow2(
-            head_dim
-        ), f"Only power of 2 head_dim is supported for K-cache Quantization!"
+        if self.rotate:
+            assert is_pow2(
+                head_dim
+            ), "Only power of 2 head_dim is supported for Q/K Hadamard rotation!"
         self.func = func
         self.k_quantizer = quant_utils.ActQuantizer()
         self.k_bits = 16
@@ -217,9 +220,10 @@ class QKRotationWrapper(torch.nn.Module):
 
     def forward(self, *args, **kwargs):
         q, k = self.func(*args, **kwargs)
-        dtype = q.dtype
-        q = (HadamardTransform.apply(q.float()) / math.sqrt(q.shape[-1])).to(dtype)
-        k = (HadamardTransform.apply(k.float()) / math.sqrt(k.shape[-1])).to(dtype)
+        if self.rotate:
+            dtype = q.dtype
+            q = (HadamardTransform.apply(q.float()) / math.sqrt(q.shape[-1])).to(dtype)
+            k = (HadamardTransform.apply(k.float()) / math.sqrt(k.shape[-1])).to(dtype)
         (bsz, num_heads, seq_len, head_dim) = k.shape
 
         if self.k_groupsize == -1:  # token-wise quantization
@@ -232,7 +236,9 @@ class QKRotationWrapper(torch.nn.Module):
                 .to(q)
             )
         else:  # head-wise quantization
-            per_head_k = k.view(-1, head_dim)
+            # RoPE can return a transposed/noncontiguous tensor. Without the
+            # Hadamard kernel there is no intervening contiguous allocation.
+            per_head_k = k.reshape(-1, head_dim)
             self.k_quantizer.find_params(per_head_k)
             k = (
                 self.k_quantizer(per_head_k)

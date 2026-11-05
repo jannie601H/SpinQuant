@@ -56,9 +56,7 @@ def parser_gen():
         "--rotate",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="""Rotate the moodel. This will include online rotation for down-projection and
-                        out-projection. Note that this does not apply rotation to the K/Q and they will be rotated
-                        if we want to quantize the Keys""",
+        help="Enable weight/residual rotations and online Hadamard transforms, including Q/K when k_bits < 16. --no-rotate disables these transforms while retaining quantization and RoPE.",
     )
     parser.add_argument(
         "--rotate_mode", type=str, default="hadamard", choices=["hadamard", "random"]
@@ -197,8 +195,7 @@ def parser_gen():
         "--k_bits",
         type=int,
         default=16,
-        help="""Number of bits for K-cache quantization.
-                        Note that quantizing the K-cache needs another rotation for the keys/queries""",
+        help="Number of bits for K-cache quantization. Q/K Hadamard is applied only with --rotate; RoPE is always retained.",
     )
     parser.add_argument("--k_groupsize", type=int, default=-1)
     parser.add_argument(
@@ -255,7 +252,7 @@ def parser_gen():
     parser.add_argument(
         "--capture_activation_stats",
         action="store_true",
-        help="Collect per-token activation quantization statistics during evaluation",
+        help="Collect per-token quantization statistics and one sequence's full activations during evaluation",
     )
 
     parser.add_argument(

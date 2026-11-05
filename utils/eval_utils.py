@@ -11,6 +11,7 @@
 import json
 import logging
 import os
+import random
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -49,6 +50,7 @@ def evaluator(model, testenc, dev, args, stats_metadata=None):
         capture_stats = capture_stats and torch.distributed.get_rank() == 0
 
     stats_dir = None
+    activation_sequence_index = None
     if capture_stats:
         if args.a_bits >= 16:
             raise ValueError("Activation statistics require a_bits < 16")
@@ -58,12 +60,15 @@ def evaluator(model, testenc, dev, args, stats_metadata=None):
             raise ValueError("Specify activation_stats_dir when collecting activation statistics")
 
         stats_dir = Path(args.activation_stats_dir)
+        # A local RNG keeps model RNG state unchanged and selects the same
+        # sequence across layers and runs with the same seed/evaluation stream.
+        activation_sequence_index = random.Random(args.seed).randrange(nsamples)
         # Reserve a fresh directory so partial/previous collections cannot mix.
         stats_dir.mkdir(parents=True, exist_ok=False)
         torch.save({"input_ids": input_ids.detach().cpu()}, stats_dir / "tokens.pt")
         metadata = {
             **(stats_metadata or {}),
-            "schema_version": 1,
+            "schema_version": 2,
             "dataset": "Salesforce/wikitext",
             "subset": "wikitext-2-raw-v1",
             "split": "test",
@@ -74,6 +79,12 @@ def evaluator(model, testenc, dev, args, stats_metadata=None):
             "seed": args.seed,
             "layerwise": args.layerwise,
             "rotate": args.rotate,
+            "norm_fused": args.rotate,
+            "qk_hadamard": args.rotate and args.k_bits < 16,
+            "activation_basis": (
+                "layerwise A_i (attn), B_i (ffn)" if args.layerwise
+                else "global R1"
+            ) if args.rotate else "original model channels (RMSNorm gamma retained)",
             "w_bits": args.w_bits,
             "a_bits": args.a_bits,
             "k_bits": args.k_bits,
@@ -82,7 +93,19 @@ def evaluator(model, testenc, dev, args, stats_metadata=None):
                 "attn": "self_attn.q_proj.quantizer",
                 "ffn": "mlp.gate_proj.quantizer",
             },
+            "site_positions": {
+                "attn": "after input_layernorm, before q_proj input quantization and linear projection",
+                "ffn": "after post_attention_layernorm, before gate_proj input quantization and linear projection",
+            },
             "sequence_order": "same row order as tokens.pt",
+            "activation_sequence_index": activation_sequence_index,
+            "activation_sequence_selection": "random.Random(seed).randrange(num_sequences)",
+            "activation_shape": "[sequence_length, channels]",
+            "activation_dtype": "original quantizer input/output dtype",
+            "activation_definition": {
+                "x": "quantizer input (before activation quantization)",
+                "x_hat": "quantizer output (dequantized activation)",
+            },
             "error_definition": "L2(x.float() - x_hat.float()) over channels",
             "statistics_dtype": "float32",
             "evaluation_time_includes_collection": True,
@@ -141,7 +164,10 @@ def evaluator(model, testenc, dev, args, stats_metadata=None):
             torch.save(captured_io, save_path)
             logging.info(f"Dumped layer input and output to: {save_path}")
 
-        stats = LayerActivationStats(i, stats_dir) if capture_stats else None
+        stats = (
+            LayerActivationStats(i, stats_dir, activation_sequence_index)
+            if capture_stats else None
+        )
         hook_context = stats.attach(layer) if stats is not None else nullcontext()
         with hook_context:
             for j in range(nbatches):

@@ -5,11 +5,16 @@ import torch
 
 
 class LayerActivationStats:
-    """Collect input-quantization statistics for one decoder layer."""
+    """Collect statistics and optionally one sequence's full activations."""
 
-    def __init__(self, layer_index, output_dir):
+    def __init__(self, layer_index, output_dir, activation_sequence_index=None):
         self.layer_index = layer_index
         self.output_dir = Path(output_dir)
+        if activation_sequence_index is not None and activation_sequence_index < 0:
+            raise ValueError("Activation sequence index must be nonnegative")
+        self.activation_sequence_index = activation_sequence_index
+        self.activations = {}
+        self.sequence_offset = 0
 
         self.records = {
             "attn": [],
@@ -39,6 +44,7 @@ class LayerActivationStats:
                 f"observed={sorted(self.seen_sites)}"
             )
 
+        self.sequence_offset += self.batch_shape[0]
         self.next_batch_index += 1
         self.batch_shape = None
 
@@ -68,6 +74,16 @@ class LayerActivationStats:
 
             if x_hat.shape != x.shape or scale.shape != x.shape:
                 raise RuntimeError("Activation/scale shapes do not match")
+
+            if self.activation_sequence_index is not None:
+                row = self.activation_sequence_index - self.sequence_offset
+                if 0 <= row < self.batch_shape[0]:
+                    # Clone only this sequence, preserving dtype and avoiding
+                    # references to a full batch's storage (including on CPU).
+                    self.activations[site] = {
+                        "x": x[row].to(device="cpu").clone(),
+                        "x_hat": x_hat[row].to(device="cpu").clone(),
+                    }
 
             x_fp32 = x.float()
             x_hat_fp32 = x_hat.float()
@@ -137,6 +153,8 @@ class LayerActivationStats:
     def save(self):
         if self.batch_shape is not None:
             raise RuntimeError("Cannot save an unfinished batch")
+        if self.activation_sequence_index is not None and set(self.activations) != {"attn", "ffn"}:
+            raise RuntimeError("Selected activation sequence was not captured at both sites")
 
         for site, records in self.records.items():
             if not records:
@@ -159,9 +177,15 @@ class LayerActivationStats:
                 "num_sequences": tensors["x_norm"].shape[0],
                 **tensors,
             }
+            if self.activation_sequence_index is not None:
+                payload.update(
+                    activation_sequence_index=self.activation_sequence_index,
+                    **self.activations[site],
+                )
 
             path = self.output_dir / (
                 f"layer_{self.layer_index:03d}_{site}.pt"
             )
             torch.save(payload, path)
             records.clear()
+        self.activations.clear()
