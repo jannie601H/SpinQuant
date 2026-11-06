@@ -32,7 +32,7 @@ def select_sequence(input_ids, sequence_length, seed, sequence_index=None):
     }
 
 
-def validate_fp_model(model):
+def validate_fp_model(model, allow_residual_rotations=False):
     """Reject known quantized/rotated modules; fused checkpoint history is external."""
     if getattr(model, "is_quantized", False) or getattr(model.config, "quantization_config", None):
         raise ValueError("FP capture requires an unquantized checkpoint")
@@ -43,9 +43,9 @@ def validate_fp_model(model):
             raise ValueError("FP capture requires a model without quantization wrappers")
         if any(getattr(module, name, False) for name in ("online_full_had", "online_partial_had")):
             raise ValueError("Online rotations must be disabled for FP capture")
-        if any(getattr(module, name, None) is not None for name in (
-            "attn_residual_rotation", "mlp_residual_rotation", "R1", "R2",
-        )):
+        forbidden = ("R1", "R2") if allow_residual_rotations else (
+            "attn_residual_rotation", "mlp_residual_rotation", "R1", "R2")
+        if any(getattr(module, name, None) is not None for name in forbidden):
             raise ValueError("Rotation modules/buffers must be absent for FP capture")
     for layer in model.model.layers:
         for parent, names in (
@@ -64,6 +64,12 @@ def capture_fp_activations(model, input_ids, output_dir, metadata=None):
     quantization, calibration, or language-model head evaluation is performed.
     """
     validate_fp_model(model)
+    return _capture_projection_inputs(model, input_ids, output_dir, metadata)
+
+
+@torch.no_grad()
+def _capture_projection_inputs(model, input_ids, output_dir, metadata=None, profile=None):
+    """Shared writer. Callers must validate their preparation and model first."""
     if input_ids.ndim != 2 or input_ids.shape[0] != 1 or input_ids.shape[1] == 0:
         raise ValueError("FP capture expects one nonempty sequence [1, tokens]")
     layers = model.model.layers
@@ -96,6 +102,7 @@ def capture_fp_activations(model, input_ids, output_dir, metadata=None):
         "sites": {"attn": "self_attn.q_proj input", "ffn": "mlp.gate_proj input"},
         "calibration_performed": False, "ppl_evaluated": False,
     }
+    manifest.update(profile or {})
 
     def save_manifest():
         (directory / "manifest.json").write_text(
@@ -133,7 +140,7 @@ def capture_fp_activations(model, input_ids, output_dir, metadata=None):
                 raise ValueError(f"Nonfinite statistic at layer {layer_index}, site {site}")
             torch.save({
                 "layer_index": layer_index, "site": site,
-                "capture_mode": "fp_single_sequence", "num_sequences": 1,
+                "capture_mode": manifest["capture_mode"], "num_sequences": 1,
                 "num_tokens": raw.shape[0], "activation_sequence_index": 0,
                 "activation_dtype": str(raw.dtype), "x": raw, **stats,
             }, directory / f"layer_{layer_index:03d}_{site}.pt")
