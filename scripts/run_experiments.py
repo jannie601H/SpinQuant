@@ -5,12 +5,12 @@ Edit EXPERIMENTS below to specify each experiment's complete conditions.
 Use the Python environment containing SpinQuant's dependencies:
 
     python scripts/run_experiments.py --dry-run
-    python scripts/run_experiments.py --experiments exp1 exp3 --dry-run
+    python scripts/run_experiments.py --experiments PCA_4bit_gsize2 JACCARD_4bit_gsize2 --dry-run
 
 Remove --dry-run to execute. CUDA_VISIBLE_DEVICES selects the GPU; each stage
 uses one torchrun worker. Without --experiments, every configured entry runs.
 Each invocation creates result/experiment(YYYYMMDD_HHMMSS), using Korea time.
-It contains exp1/, exp2/, ... and one summary.csv for that invocation.
+It contains one subfolder per experiment name and one summary.csv for that invocation.
 --results-dir changes the parent directory containing these run folders.
 Failures are recorded and execution continues; Ctrl-C/SIGTERM stops the run.
 Exit codes: 0 = all succeeded (or dry run), 1 = failures, 130 = interrupted.
@@ -50,11 +50,11 @@ MAX_STEPS = 100
 RUN_TIMEZONE = timezone(timedelta(hours=9), "KST")
 
 # 실행할 실험을 아래에 직접 정의합니다. 각 항목은 한 번씩, 작성 순서대로 실행됩니다.
-# exp2~exp5, exp8~exp11은 rotation similarity 기반 비균등 grouping 실험입니다.
-# analysis/rotation_similarity_three_runs/boundary_comparison의 원본 group_candidates.json에서
-# 정밀도·G별로 173633, 144201, 131536 중 2개 이상 실행이 선택한 경계를 사용합니다.
-# 4-bit G=16 후보는 조건을 만족하는 경계가 16개이므로 exp5는 실제 17개 group입니다.
-# exp1/exp7은 global, exp6/exp12는 32개 group 기준 실험입니다.
+# PCA_*와 JACCARD_*는 각각 PCA16, Top-5% Jaccard activation-aware grouping 실험입니다.
+# analysis/activation_aware_grouping/group_candidates.json의 각 지표 경계를 사용합니다.
+# 각 정밀도에서 순서대로 2, 4, 8, 16개 group이며, 두 정밀도의 경계는 동일합니다.
+# 이름의 gsize는 그룹 크기가 아닌 그룹 개수를 뜻합니다. KV quantization groupsize와 별개입니다.
+# 총 16개 실험(2개 지표 × 2개 정밀도 × 4개 그룹 수)이며 global/32-group 실험은 없습니다.
 # model은 Hugging Face 모델 ID 또는 로컬 모델 디렉터리입니다.
 # groupnum은 Attention/MLP block을 나눌 그룹 개수입니다 (1B: 1, 2, 4, 8, 16, 32).
 # groupnum 대신 layerwise를 지정할 수 있습니다: True는 기존 full layer-wise, False는 global.
@@ -62,70 +62,134 @@ RUN_TIMEZONE = timezone(timedelta(hours=9), "KST")
 # 경계는 0-based Attention/MLP block 뒤의 위치입니다. []는 하나의 group입니다.
 # groupnum, layerwise, group_boundaries 중 정확히 하나만 지정해야 합니다.
 EXPERIMENTS = {
-    # "exp2": {
-    #     "model": "meta-llama/Llama-3.2-1B",
-    #     "w_bits": 4,
-    #     "a_bits": 4,
-    #     "kv_bits": 4,
-    #     "group_boundaries": [3],
-    #     "learning_rate": 15,
-    # },
-    # "exp3": {
-    #     "model": "meta-llama/Llama-3.2-1B",
-    #     "w_bits": 4,
-    #     "a_bits": 4,
-    #     "kv_bits": 4,
-    #     "group_boundaries": [3, 4, 5],
-    #     "learning_rate": 15,
-    # },
-    # "exp4": {
-    #     "model": "meta-llama/Llama-3.2-1B",
-    #     "w_bits": 4,
-    #     "a_bits": 4,
-    #     "kv_bits": 4,
-    #     "group_boundaries": [1, 2, 3, 4, 5, 6, 8],
-    #     "learning_rate": 15,
-    # },
-    # "exp5": {
-    #     "model": "meta-llama/Llama-3.2-1B",
-    #     "w_bits": 4,
-    #     "a_bits": 4,
-    #     "kv_bits": 4,
-    #     "group_boundaries": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 18, 25, 26],
-    #     "learning_rate": 15,
-    # },
-    "exp8": {
+    "PCA_4bit_gsize2": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "group_boundaries": [17],
+        "learning_rate": 15,
+    },
+    "PCA_4bit_gsize4": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "group_boundaries": [5, 12, 22],
+        "learning_rate": 15,
+    },
+    "PCA_4bit_gsize8": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "group_boundaries": [1, 5, 8, 11, 16, 21, 28],
+        "learning_rate": 15,
+    },
+    "PCA_4bit_gsize16": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "group_boundaries": [0, 1, 2, 3, 4, 5, 7, 9, 10, 13, 16, 19, 22, 23, 28],
+        "learning_rate": 15,
+    },
+    "PCA_3bit_gsize2": {
         "model": "meta-llama/Llama-3.2-1B",
         "w_bits": 3,
         "a_bits": 3,
         "kv_bits": 3,
-        "group_boundaries": [3],
+        "group_boundaries": [17],
         "learning_rate": 15,
     },
-    # "exp9": {
-    #     "model": "meta-llama/Llama-3.2-1B",
-    #     "w_bits": 3,
-    #     "a_bits": 3,
-    #     "kv_bits": 3,
-    #     "group_boundaries": [1, 3, 4],
-    #     "learning_rate": 15,
-    # },
-    "exp10": {
+    "PCA_3bit_gsize4": {
         "model": "meta-llama/Llama-3.2-1B",
         "w_bits": 3,
         "a_bits": 3,
         "kv_bits": 3,
-        "group_boundaries": [0, 1, 2, 3, 4, 5, 6],
+        "group_boundaries": [5, 12, 22],
         "learning_rate": 15,
     },
-    # "exp11": {
-    #     "model": "meta-llama/Llama-3.2-1B",
-    #     "w_bits": 3,
-    #     "a_bits": 3,
-    #     "kv_bits": 3,
-    #     "group_boundaries": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 18, 19, 20],
-    #     "learning_rate": 15,
-    # },
+    "PCA_3bit_gsize8": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 3,
+        "a_bits": 3,
+        "kv_bits": 3,
+        "group_boundaries": [1, 5, 8, 11, 16, 21, 28],
+        "learning_rate": 15,
+    },
+    "PCA_3bit_gsize16": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 3,
+        "a_bits": 3,
+        "kv_bits": 3,
+        "group_boundaries": [0, 1, 2, 3, 4, 5, 7, 9, 10, 13, 16, 19, 22, 23, 28],
+        "learning_rate": 15,
+    },
+    "JACCARD_4bit_gsize2": {
+            "model": "meta-llama/Llama-3.2-1B",
+            "w_bits": 4,
+            "a_bits": 4,
+            "kv_bits": 4,
+            "group_boundaries": [10],
+            "learning_rate": 15,
+        },
+    "JACCARD_4bit_gsize4": {
+            "model": "meta-llama/Llama-3.2-1B",
+            "w_bits": 4,
+            "a_bits": 4,
+            "kv_bits": 4,
+            "group_boundaries": [1, 10, 18],
+            "learning_rate": 15,
+        },
+    "JACCARD_4bit_gsize8": {
+            "model": "meta-llama/Llama-3.2-1B",
+            "w_bits": 4,
+            "a_bits": 4,
+            "kv_bits": 4,
+            "group_boundaries": [0, 1, 4, 9, 10, 18, 30],
+            "learning_rate": 15,
+        },
+    "JACCARD_4bit_gsize16": {
+            "model": "meta-llama/Llama-3.2-1B",
+            "w_bits": 4,
+            "a_bits": 4,
+            "kv_bits": 4,
+            "group_boundaries": [0, 1, 4, 8, 9, 10, 12, 15, 20, 21, 26, 27, 28, 29, 30],
+            "learning_rate": 15,
+        },
+    "JACCARD_3bit_gsize2": {
+            "model": "meta-llama/Llama-3.2-1B",
+            "w_bits": 3,
+            "a_bits": 3,
+            "kv_bits": 3,
+            "group_boundaries": [10],
+            "learning_rate": 15,
+        },
+    "JACCARD_3bit_gsize4": {
+            "model": "meta-llama/Llama-3.2-1B",
+            "w_bits": 3,
+            "a_bits": 3,
+            "kv_bits": 3,
+            "group_boundaries": [1, 10, 18],
+            "learning_rate": 15,
+        },
+    "JACCARD_3bit_gsize8": {
+            "model": "meta-llama/Llama-3.2-1B",
+            "w_bits": 3,
+            "a_bits": 3,
+            "kv_bits": 3,
+            "group_boundaries": [0, 1, 4, 9, 10, 18, 30],
+            "learning_rate": 15,
+        },
+    "JACCARD_3bit_gsize16": {
+            "model": "meta-llama/Llama-3.2-1B",
+            "w_bits": 3,
+            "a_bits": 3,
+            "kv_bits": 3,
+            "group_boundaries": [0, 1, 4, 8, 9, 10, 12, 15, 20, 21, 26, 27, 28, 29, 30],
+            "learning_rate": 15,
+        },
 }
 
 TIMING_LOG_FIELDS = {
