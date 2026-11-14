@@ -6,6 +6,7 @@ Use the Python environment containing SpinQuant's dependencies:
 
     python scripts/run_experiments.py --dry-run
     python scripts/run_experiments.py --experiments PCA_4bit_gsize2 JACCARD_4bit_gsize2 --dry-run
+    python scripts/run_experiments.py --experiments UNIFORM_3bit_gsize2 UNIFORM_3bit_gsize4 --dry-run
 
 Remove --dry-run to execute. CUDA_VISIBLE_DEVICES selects the GPU; each stage
 uses one torchrun worker. Without --experiments, every configured entry runs.
@@ -52,9 +53,11 @@ RUN_TIMEZONE = timezone(timedelta(hours=9), "KST")
 # 실행할 실험을 아래에 직접 정의합니다. 각 항목은 한 번씩, 작성 순서대로 실행됩니다.
 # PCA_*와 JACCARD_*는 각각 PCA16, Top-5% Jaccard activation-aware grouping 실험입니다.
 # analysis/activation_aware_grouping/group_candidates.json의 각 지표 경계를 사용합니다.
+# UNIFORM_*는 groupnum으로 지정한 개수만큼 입력 block을 균등하게 나눕니다.
 # 각 정밀도에서 순서대로 2, 4, 8, 16개 group이며, 두 정밀도의 경계는 동일합니다.
 # 이름의 gsize는 그룹 크기가 아닌 그룹 개수를 뜻합니다. KV quantization groupsize와 별개입니다.
-# 총 16개 실험(2개 지표 × 2개 정밀도 × 4개 그룹 수)이며 global/32-group 실험은 없습니다.
+# 총 24개 실험(3개 분할 방식 × 2개 정밀도 × 4개 그룹 수)이며 global/32-group 실험은 없습니다.
+# --experiments를 생략하면 24개 모두 실행합니다. Uniform만 실행할 때는 UNIFORM_* 이름을 명시합니다.
 # model은 Hugging Face 모델 ID 또는 로컬 모델 디렉터리입니다.
 # groupnum은 Attention/MLP block을 나눌 그룹 개수입니다 (1B: 1, 2, 4, 8, 16, 32).
 # groupnum 대신 layerwise를 지정할 수 있습니다: True는 기존 full layer-wise, False는 global.
@@ -190,6 +193,70 @@ EXPERIMENTS = {
             "group_boundaries": [0, 1, 4, 8, 9, 10, 12, 15, 20, 21, 26, 27, 28, 29, 30],
             "learning_rate": 15,
         },
+    "UNIFORM_4bit_gsize2": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "groupnum": 2,
+        "learning_rate": 15,
+    },
+    "UNIFORM_4bit_gsize4": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "groupnum": 4,
+        "learning_rate": 15,
+    },
+    "UNIFORM_4bit_gsize8": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "groupnum": 8,
+        "learning_rate": 15,
+    },
+    "UNIFORM_4bit_gsize16": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 4,
+        "a_bits": 4,
+        "kv_bits": 4,
+        "groupnum": 16,
+        "learning_rate": 15,
+    },
+    "UNIFORM_3bit_gsize2": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 3,
+        "a_bits": 3,
+        "kv_bits": 3,
+        "groupnum": 2,
+        "learning_rate": 15,
+    },
+    "UNIFORM_3bit_gsize4": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 3,
+        "a_bits": 3,
+        "kv_bits": 3,
+        "groupnum": 4,
+        "learning_rate": 15,
+    },
+    "UNIFORM_3bit_gsize8": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 3,
+        "a_bits": 3,
+        "kv_bits": 3,
+        "groupnum": 8,
+        "learning_rate": 15,
+    },
+    "UNIFORM_3bit_gsize16": {
+        "model": "meta-llama/Llama-3.2-1B",
+        "w_bits": 3,
+        "a_bits": 3,
+        "kv_bits": 3,
+        "groupnum": 16,
+        "learning_rate": 15,
+    },
 }
 
 TIMING_LOG_FIELDS = {
