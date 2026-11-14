@@ -70,12 +70,6 @@ EXPERIMENTS = {
         "a_bits": 4,
         "kv_bits": 4,
     },
-    "exp2": {
-        "model": "meta-llama/Llama-3.2-1B",
-        "w_bits": 3,
-        "a_bits": 3,
-        "kv_bits": 3,
-    },
 }
 
 TIMING_LOG_FIELDS = {
