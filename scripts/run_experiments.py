@@ -30,6 +30,9 @@ runs during evaluation only; evaluation timing then includes collection costs.
 --capture-fp-activations instead runs only one unpadded sequence through a fresh
 FP backbone. It forces no rotation and W/A/K/V16, skips training/PTQ/PPL, and
 saves raw activations and max/RMS statistics under fp_activations/.
+--capture-fused-fp-activations collects 96 independent sequences after norm fusion:
+64 grouping train + 32 grouping test, both sampled from WikiText-2 train.
+It also skips rotation/training/PTQ/PPL. Select one experiment to capture once.
 The existing parser consumes --seed for rotation initialization and PTQ; the
 Trainer's separate seed remains its existing default of 42.
 """
@@ -122,10 +125,14 @@ def parse_args(argv=None):
         "--capture-fp-activations", action="store_true",
         help="Capture one FP sequence; override bit widths to 16 and disable rotation, training, PTQ and PPL",
     )
+    parser.add_argument(
+        "--capture-fused-fp-activations", action="store_true",
+        help="Capture 96 post-fusion FP sequences (64 train/32 test) from WikiText-2 train; no rotation/PTQ/PPL",
+    )
     args = parser.parse_args(argv)
-    if args.capture_fp_activations:
-        if args.capture_activation_stats:
-            parser.error("Choose --capture-fp-activations or --capture-activation-stats, not both")
+    if sum((args.capture_fp_activations, args.capture_fused_fp_activations, args.capture_activation_stats)) > 1:
+        parser.error("Choose only one activation capture mode")
+    if args.capture_fp_activations or args.capture_fused_fp_activations:
         args.rotate = False
     if not 0 <= args.seed < 2**32:
         parser.error("--seed must be between 0 and 2**32 - 1")
@@ -166,6 +173,9 @@ def conditions(args):
                 raise ValueError(f"{name}: {field} must be an integer between 2 and 16")
         if args.capture_fp_activations:
             config.update(w_bits=16, a_bits=16, kv_bits=16, capture_mode="fp_single_sequence")
+        if args.capture_fused_fp_activations:
+            config.update(w_bits=16, a_bits=16, kv_bits=16, norm_fused=True,
+                          capture_mode="fp_fused_multisequence", train_sequences=64, test_sequences=32)
         config["qk_hadamard"] = args.rotate and config["kv_bits"] < 16
         if args.capture_activation_stats and config["a_bits"] >= 16:
             raise ValueError(f"{name}: activation statistics require a_bits < 16")
@@ -200,6 +210,15 @@ def create_run_directory(results_dir, dry_run=False):
 
 
 def commands(config, directory, args):
+    if config.get("capture_mode") == "fp_fused_multisequence":
+        return {"eval": [
+            sys.executable, str(ROOT / "scripts/capture_fused_activations.py"),
+            "--input-model", config["model"],
+            "--output-dir", str(directory / "fp_activations"),
+            "--seed", str(config["seed"]), "--sequence-length", "2048",
+            "--train-sequences", str(config["train_sequences"]),
+            "--test-sequences", str(config["test_sequences"]), "--dtype", "bfloat16",
+        ]}
     if config.get("capture_mode") == "fp_single_sequence":
         return {"eval": [
             sys.executable, str(ROOT / "scripts/capture_fp_activations.py"),
@@ -374,7 +393,8 @@ def read_timings(directory):
 
 def run_experiment(config, directory, args, version):
     directory.mkdir(parents=True, exist_ok=False)
-    capture_fp = config.get("capture_mode") == "fp_single_sequence"
+    capture_fused = config.get("capture_mode") == "fp_fused_multisequence"
+    capture_fp = capture_fused or config.get("capture_mode") == "fp_single_sequence"
     started = time.monotonic()
     result = {
         "experiment": config["name"], "conditions": config,
@@ -387,7 +407,9 @@ def run_experiment(config, directory, args, version):
         "commands": commands(config, directory, args),
         "evaluation": {
             "dataset": "Salesforce/wikitext", "subset": "wikitext-2-raw-v1",
-            "split": "test", "sequence_length": 2048,
+            "split": "train" if capture_fused else "test", "sequence_length": 2048,
+            **({"grouping_split_counts": {"train": config["train_sequences"],
+                                         "test": config["test_sequences"]}} if capture_fused else {}),
             "batch_size": 1 if capture_fp else args.eval_batch_size,
             "ppl_evaluated": not capture_fp,
             "weight_quantization": "gptq" if config["w_bits"] < 16 else "none",
@@ -426,8 +448,12 @@ def run_experiment(config, directory, args, version):
         if capture_fp:
             manifest_path = directory / "fp_activations" / "manifest.json"
             manifest = json.loads(manifest_path.read_text())
-            if manifest.get("status") != "complete" or manifest.get("capture_mode") != "fp_single_sequence":
+            if manifest.get("status") != "complete" or manifest.get("capture_mode") != config["capture_mode"]:
                 raise ValueError("FP activation collection did not complete")
+            if capture_fused and (manifest.get("completed_sequences") != config["train_sequences"] + config["test_sequences"]
+                    or manifest.get("split_counts") != {"train": config["train_sequences"], "test": config["test_sequences"]}
+                    or manifest.get("source_split") != "train" or manifest.get("norm_fused") is not True):
+                raise ValueError("Fused FP collection has incorrect split counts or fusion metadata")
         else:
             result["final_ppl"] = read_ppl(directory / "eval.log")
         result["status"] = "success"
@@ -461,6 +487,8 @@ def main(argv=None):
     version = code_version() if not args.dry_run else None
     run_directory = create_run_directory(args.results_dir, dry_run=args.dry_run)
     mode = "FP capture (one sequence; no PTQ/PPL)" if args.capture_fp_activations else f"max_steps={MAX_STEPS}"
+    if args.capture_fused_fp_activations:
+        mode = "post-fusion FP capture (64 train + 32 test sequences; no PTQ/PPL)"
     print(f"{len(experiments)} experiments; {mode}; results={run_directory}", flush=True)
     failed = 0
     for index, config in enumerate(experiments, 1):

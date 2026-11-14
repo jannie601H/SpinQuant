@@ -141,7 +141,9 @@ def _capture_projection_inputs(model, input_ids, output_dir, metadata=None, prof
             torch.save({
                 "layer_index": layer_index, "site": site,
                 "capture_mode": manifest["capture_mode"], "num_sequences": 1,
-                "num_tokens": raw.shape[0], "activation_sequence_index": 0,
+                "num_tokens": raw.shape[0], "activation_sequence_index": manifest["activation_sequence_index"],
+                **{key: manifest[key] for key in ("grouping_split", "split_sequence_index", "source_sequence_index")
+                   if key in manifest},
                 "activation_dtype": str(raw.dtype), "x": raw, **stats,
             }, directory / f"layer_{layer_index:03d}_{site}.pt")
             seen.add(key)
