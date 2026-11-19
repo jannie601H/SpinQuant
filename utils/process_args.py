@@ -12,8 +12,9 @@ from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 import argparse
+import json
 import transformers
-from utils.rotation_groups import validate_group_boundaries
+from utils.rotation_groups import validate_group_boundaries, validate_rotation_groups
 
 
 @dataclass
@@ -65,7 +66,18 @@ def parser_gen():
         "--rotate_mode", type=str, default="hadamard", choices=["hadamard", "random"]
     )
 
+    def parse_rotation_groups(value):
+        groups = json.loads(value)
+        validate_rotation_groups(groups)
+        return groups
+
     rotation_layout = parser.add_mutually_exclusive_group()
+    rotation_layout.add_argument(
+        "--rotation_groups", type=parse_rotation_groups, default=None, metavar="JSON",
+        help='Explicit rotation groups as a JSON list of block lists, e.g. "[[0,2],[1,3]]". '
+             "Block order is A0, FFN0, A1, FFN1, ...; each block must occur exactly once. "
+             "Final output shares the last FFN's group.",
+    )
     rotation_layout.add_argument(
         "--group_boundaries", type=int, nargs="*", default=None, metavar="BLOCK",
         help="Zero-based Attention/MLP block indices AFTER which to split, in increasing order. "

@@ -116,6 +116,16 @@ nor grouped checkpoint metadata, the Python entry points retain legacy global R1
 CPU regression checks (using the environment with the project dependencies):
 `python -m unittest discover -s tests -v`.
 
+### Noncontiguous rotation groups
+
+Use `rotation_groups` in `scripts/run_experiments.py` to supply explicit lists of
+Attention/FFN block indices. For a 16-layer model,
+`"rotation_groups": [list(range(0, 32, 2)), list(range(1, 32, 2))]` shares one
+rotation across all Attention inputs and another across all FFN inputs.
+The existing residual transition path is retained. Training, checkpoint loading,
+evaluation, and result records support these layouts.
+See [configuration and validation details](docs/noncontiguous_rotation_grouping.md).
+
  
 ## Quantized Models
  | Model | LLaMA-3 8B | | LLaMA-3 70B | | LLaMA-2 7B | | LLaMA-2 13B | | LLaMA-2 70B | | 

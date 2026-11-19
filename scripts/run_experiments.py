@@ -45,7 +45,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from utils.rotation_groups import validate_group_boundaries
+from utils.rotation_groups import validate_group_boundaries, validate_rotation_groups
 
 MAX_STEPS = 100
 RUN_TIMEZONE = timezone(timedelta(hours=9), "KST")
@@ -63,7 +63,9 @@ RUN_TIMEZONE = timezone(timedelta(hours=9), "KST")
 # groupnum 대신 layerwise를 지정할 수 있습니다: True는 기존 full layer-wise, False는 global.
 # group_boundaries로 비균등 grouping도 가능합니다. 예: [3, 4, 5] -> 4개 group, 해당 block 뒤에서 boundary 설정.
 # 경계는 0-based Attention/MLP block 뒤의 위치입니다. []는 하나의 group입니다.
-# groupnum, layerwise, group_boundaries 중 정확히 하나만 지정해야 합니다.
+# rotation_groups는 그룹별 block 목록입니다. 예: [list(range(0, 32, 2)), list(range(1, 32, 2))]
+# 위 예는 모든 Attention과 모든 FFN을 각각 공유합니다. 모든 block을 정확히 한 번 포함해야 합니다.
+# groupnum, layerwise, group_boundaries, rotation_groups 중 정확히 하나만 지정해야 합니다.
 EXPERIMENTS = {
     "PCA_4bit_gsize2": {
         "model": "meta-llama/Llama-3.2-1B",
@@ -270,6 +272,7 @@ TIMING_FIELDS = [field for labels in TIMING_LOG_FIELDS.values() for field in lab
 
 SUMMARY_FIELDS = [
     "experiment", "model", "w_bits", "a_bits", "kv_bits", "groupnum", "layerwise", "group_boundaries",
+    "rotation_groups",
     "learning_rate", "max_steps", "seed", "status", "final_ppl",
     "started_at", "finished_at", "duration_seconds", *TIMING_FIELDS, "result_dir", "error",
 ]
@@ -317,13 +320,13 @@ def conditions(args):
             raise ValueError(f"Invalid experiment name {name!r}; use 1-32 letters, digits, '-' or '_'")
         if not isinstance(definition, dict):
             raise ValueError(f"{name}: experiment conditions must be a dictionary")
-        layouts = set(definition) & {"groupnum", "layerwise", "group_boundaries"}
+        layouts = set(definition) & {"groupnum", "layerwise", "group_boundaries", "rotation_groups"}
         if len(layouts) != 1:
-            raise ValueError(f"{name}: specify exactly one of groupnum, layerwise or group_boundaries")
+            raise ValueError(f"{name}: specify exactly one of groupnum, layerwise, group_boundaries or rotation_groups")
         if set(definition) != required | layouts:
             raise ValueError(
                 f"{name}: specify exactly these fields: {', '.join(sorted(required))}, "
-                "and exactly one of groupnum, layerwise or group_boundaries"
+                "and exactly one of groupnum, layerwise, group_boundaries or rotation_groups"
             )
         config = dict(definition, name=name, max_steps=MAX_STEPS, seed=args.seed)
         if not isinstance(config["model"], str) or not config["model"].strip():
@@ -331,7 +334,11 @@ def conditions(args):
         for field in ("w_bits", "a_bits", "kv_bits"):
             if type(config[field]) is not int or not 2 <= config[field] <= 16:
                 raise ValueError(f"{name}: {field} must be an integer between 2 and 16")
-        if "group_boundaries" in config:
+        if "rotation_groups" in config:
+            validate_rotation_groups(config["rotation_groups"])
+            config["rotation_groups"] = [list(group) for group in config["rotation_groups"]]
+            config["groupnum"] = len(config["rotation_groups"])  # For result records only.
+        elif "group_boundaries" in config:
             validate_group_boundaries(config["group_boundaries"])
             config["group_boundaries"] = list(config["group_boundaries"])
             config["groupnum"] = len(config["group_boundaries"]) + 1  # Derived, for result records only.
@@ -371,7 +378,9 @@ def commands(config, directory, args):
     # Use this interpreter for both torchrun and its worker, so the active
     # environment supplies all dependencies. --standalone allocates a free port.
     launcher = [sys.executable, "-m", "torch.distributed.run", "--standalone", "--nnodes=1", "--nproc_per_node=1"]
-    if "group_boundaries" in config:
+    if "rotation_groups" in config:
+        layout = ["--rotation_groups", json.dumps(config["rotation_groups"])]
+    elif "group_boundaries" in config:
         layout = ["--group_boundaries", *map(str, config["group_boundaries"])]
     elif "groupnum" in config:
         layout = ["--groupnum", str(config["groupnum"])]
@@ -422,8 +431,9 @@ def write_result(directory, result):
 
 def append_summary(results_dir, result):
     row = {key: result["conditions"].get(key, result.get(key)) for key in SUMMARY_FIELDS}
-    if row["group_boundaries"] is not None:
-        row["group_boundaries"] = json.dumps(row["group_boundaries"])
+    for field in ("group_boundaries", "rotation_groups"):
+        if row[field] is not None:
+            row[field] = json.dumps(row[field])
     with (results_dir / "summary.csv").open("a+", newline="", encoding="utf-8") as output:
         # Keep header and rows intact if separate runners share this directory.
         fcntl.flock(output, fcntl.LOCK_EX)

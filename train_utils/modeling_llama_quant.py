@@ -1354,15 +1354,16 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def set_group_rotations(self, rotations, group_boundaries=None):
+    def set_group_rotations(self, rotations, group_boundaries=None, rotation_groups=None):
         """Own one module per group; A/B are only tensor references at forward time."""
         if any(rotation is not None for rotation in (self.R1, self.A, self.B)):
             raise ValueError("Grouped rotations cannot be combined with legacy R1/A/B rotations")
         ids = rotation_group_indices(
             self.config.num_hidden_layers,
-            len(rotations) if group_boundaries is None else None, group_boundaries)
-        if len(rotations) != ids[-1] + 1:
-            raise ValueError("Number of rotation modules does not match group boundaries")
+            len(rotations) if group_boundaries is None and rotation_groups is None else None,
+            group_boundaries, rotation_groups)
+        if len(rotations) != len(set(ids)):
+            raise ValueError("Number of rotation modules does not match rotation groups")
         self.rotation_group_ids = ids
         self.Q = nn.ModuleList(rotations)
 

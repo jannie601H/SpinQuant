@@ -135,8 +135,8 @@ def rotate_model(model, args):
     num_layers = len(model.model.layers)
     group_ids = checkpoint_group_indices(
         checkpoint, num_layers, getattr(args, "groupnum", None), layerwise,
-        getattr(args, "group_boundaries", None))
-    groupnum = group_ids[-1] + 1 if group_ids is not None else None
+        getattr(args, "group_boundaries", None), getattr(args, "rotation_groups", None))
+    groupnum = len(set(group_ids)) if group_ids is not None else None
 
     def rotation(key, size):
         if checkpoint is not None:
@@ -146,10 +146,29 @@ def rotate_model(model, args):
             return value.to(device=utils.DEV, dtype=torch.float64)
         return get_orthogonal_matrix(size, args.rotate_mode, device=utils.DEV)
 
-    first_key = "Q.0" if group_ids is not None else ("A.0" if layerwise else "R1")
-    if groupnum == 1 and checkpoint is not None and "R1" in checkpoint:
-        first_key = "R1"  # Legacy global checkpoint.
-    A = rotation(first_key, model_dim)
+    # Revisited groups must reuse the same random rotation. Keep only matrices
+    # needed at a later group entry, on CPU; checkpoint tensors already live there.
+    random_groups = {}
+    last_group_entry = ({group: block for block, group in enumerate(group_ids)
+                         if block == 0 or group != group_ids[block - 1]}
+                        if group_ids is not None else {})
+
+    def group_rotation(group, block):
+        if checkpoint is not None:
+            key = "R1" if groupnum == 1 and "R1" in checkpoint else f"Q.{group}"
+            return rotation(key, model_dim)
+        if group in random_groups:
+            value = random_groups[group].to(device=utils.DEV, dtype=torch.float64)
+        else:
+            value = rotation(f"Q.{group}", model_dim)
+        if last_group_entry[group] > block:
+            random_groups[group] = value.cpu()
+        else:
+            random_groups.pop(group, None)
+        return value
+
+    A = (group_rotation(group_ids[0], 0) if group_ids is not None
+         else rotation("A.0" if layerwise else "R1", model_dim))
     rotate_embeddings(model, A)
     utils.cleanup_memory()
 
@@ -160,10 +179,8 @@ def rotate_model(model, args):
             a_group, b_group, next_group = group_ids[2 * idx:2 * idx + 3]
             attn_transition = a_group != b_group
             mlp_transition = b_group != next_group
-            # Groups are contiguous, so retain the current matrix and generate/load
-            # a new one only at a boundary. This also shares random rotations.
-            B = rotation(f"Q.{b_group}", model_dim) if attn_transition else A
-            A_next = rotation(f"Q.{next_group}", model_dim) if mlp_transition else B
+            B = group_rotation(b_group, 2 * idx + 1) if attn_transition else A
+            A_next = group_rotation(next_group, 2 * idx + 2) if mlp_transition else B
         else:
             B = rotation(f"B.{idx}", model_dim) if layerwise else A
             A_next = rotation(f"A.{idx+1}", model_dim) if layerwise else A
