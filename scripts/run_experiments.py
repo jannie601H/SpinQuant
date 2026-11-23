@@ -5,8 +5,7 @@ Edit EXPERIMENTS below to specify each experiment's complete conditions.
 Use the Python environment containing SpinQuant's dependencies:
 
     python scripts/run_experiments.py --dry-run
-    python scripts/run_experiments.py --experiments PCA_4bit_gsize2 JACCARD_4bit_gsize2 --dry-run
-    python scripts/run_experiments.py --experiments UNIFORM_3bit_gsize2 UNIFORM_3bit_gsize4 --dry-run
+    python scripts/run_experiments.py --experiments TYPE_SHARED_4bit_g2 TYPE_PCA16_4bit_g4 TYPE_PCA16_4bit_g8 TYPE_PCA16_4bit_g16 --dry-run
 
 Remove --dry-run to execute. CUDA_VISIBLE_DEVICES selects the GPU; each stage
 uses one torchrun worker. Without --experiments, every configured entry runs.
@@ -51,13 +50,10 @@ MAX_STEPS = 100
 RUN_TIMEZONE = timezone(timedelta(hours=9), "KST")
 
 # 실행할 실험을 아래에 직접 정의합니다. 각 항목은 한 번씩, 작성 순서대로 실행됩니다.
-# PCA_*와 JACCARD_*는 각각 PCA16, Top-5% Jaccard activation-aware grouping 실험입니다.
-# analysis/activation_aware_grouping/group_candidates.json의 각 지표 경계를 사용합니다.
-# UNIFORM_*는 groupnum으로 지정한 개수만큼 입력 block을 균등하게 나눕니다.
-# 각 정밀도에서 순서대로 2, 4, 8, 16개 group이며, 두 정밀도의 경계는 동일합니다.
-# 이름의 gsize는 그룹 크기가 아닌 그룹 개수를 뜻합니다. KV quantization groupsize와 별개입니다.
-# 총 24개 실험(3개 분할 방식 × 2개 정밀도 × 4개 그룹 수)이며 global/32-group 실험은 없습니다.
-# --experiments를 생략하면 24개 모두 실행합니다. Uniform만 실행할 때는 UNIFORM_* 이름을 명시합니다.
+# 각 실험은 Attention과 FFN에 각각 n개 그룹을 배정합니다. 이름의 g는 전체 그룹 수(2n)입니다.
+# 그룹 선택에는 train64의 PCA16 부분공간 유사도만 사용했습니다. 레이어 순서나 인접성 제약은 없습니다.
+# 출처: analysis/activation_aware_grouping/similarity_only/group_candidates.json → pca16 → 2n → separate_types
+# 블록 번호는 A_i = 2i, F_i = 2i+1입니다. 아래 주석은 0부터 시작하는 모델 레이어 번호입니다.
 # model은 Hugging Face 모델 ID 또는 로컬 모델 디렉터리입니다.
 # groupnum은 Attention/MLP block을 나눌 그룹 개수입니다 (1B: 1, 2, 4, 8, 16, 32).
 # groupnum 대신 layerwise를 지정할 수 있습니다: True는 기존 full layer-wise, False는 global.
@@ -66,18 +62,65 @@ RUN_TIMEZONE = timezone(timedelta(hours=9), "KST")
 # rotation_groups는 그룹별 block 목록입니다. 예: [list(range(0, 32, 2)), list(range(1, 32, 2))]
 # 위 예는 모든 Attention과 모든 FFN을 각각 공유합니다. 모든 block을 정확히 한 번 포함해야 합니다.
 # groupnum, layerwise, group_boundaries, rotation_groups 중 정확히 하나만 지정해야 합니다.
+TYPE_ROTATION_GROUPS = {
+    2: [
+        list(range(0, 32, 2)),  # A0–15
+        list(range(1, 32, 2)),  # F0–15
+    ],
+    4: [
+        [0, 2, 4, 6, 8, 10, 12, 14],        # A0–7
+        [1, 3, 5, 7, 9, 11, 13, 15],        # F0–7
+        [16, 18, 20, 22, 24, 26, 28, 30],  # A8–15
+        [17, 19, 21, 23, 25, 27, 29, 31],  # F8–15
+    ],
+    8: [
+        [0],                        # A0
+        [1],                        # F0
+        [2, 4, 6, 8, 10],           # A1–5
+        [3, 5, 7, 9],               # F1–4
+        [11, 13, 15, 17, 19],       # F5–9
+        [12, 14, 16, 18],           # A6–9
+        [20, 22, 24, 26, 28, 30],  # A10–15
+        [21, 23, 25, 27, 29, 31],  # F10–15
+    ],
+    16: [
+        [0],               # A0
+        [1],               # F0
+        [2, 4],            # A1–2
+        [3, 5],            # F1–2
+        [6, 8],            # A3–4
+        [7, 9],            # F3–4
+        [10],              # A5
+        [11, 13],          # F5–6
+        [12, 14],          # A6–7
+        [15, 17],          # F7–8
+        [16, 18],          # A8–9
+        [19, 21, 23],      # F9–11
+        [20, 22, 24, 26],  # A10–13
+        [25, 27, 29],      # F12–14
+        [28, 30],          # A14–15
+        [31],              # F15
+    ],
+}
+
+TYPE_SHARED_3BIT = {
+    "model": "meta-llama/Llama-3.2-1B",
+    "learning_rate": 15,
+    "w_bits": 3,
+    "a_bits": 3,
+    "kv_bits": 3,
+}
+TYPE_SHARED_4BIT = {**TYPE_SHARED_3BIT, "w_bits": 4, "a_bits": 4, "kv_bits": 4}
+
 EXPERIMENTS = {
-    "TYPE_SHARED_3bit_g2": {
-        "model": "meta-llama/Llama-3.2-1B",
-        "w_bits": 3,
-        "a_bits": 3,
-        "kv_bits": 3,
-        "rotation_groups": [
-            list(range(0, 32, 2)),  # Q.0: all Attention inputs
-            list(range(1, 32, 2)),  # Q.1: all FFN inputs
-        ],
-        "learning_rate": 15,
-    },
+    "TYPE_SHARED_3bit_g2": {**TYPE_SHARED_3BIT, "rotation_groups": TYPE_ROTATION_GROUPS[2]},
+    "TYPE_PCA16_3bit_g4": {**TYPE_SHARED_3BIT, "rotation_groups": TYPE_ROTATION_GROUPS[4]},
+    "TYPE_PCA16_3bit_g8": {**TYPE_SHARED_3BIT, "rotation_groups": TYPE_ROTATION_GROUPS[8]},
+    "TYPE_PCA16_3bit_g16": {**TYPE_SHARED_3BIT, "rotation_groups": TYPE_ROTATION_GROUPS[16]},
+    "TYPE_SHARED_4bit_g2": {**TYPE_SHARED_4BIT, "rotation_groups": TYPE_ROTATION_GROUPS[2]},
+    "TYPE_PCA16_4bit_g4": {**TYPE_SHARED_4BIT, "rotation_groups": TYPE_ROTATION_GROUPS[4]},
+    "TYPE_PCA16_4bit_g8": {**TYPE_SHARED_4BIT, "rotation_groups": TYPE_ROTATION_GROUPS[8]},
+    "TYPE_PCA16_4bit_g16": {**TYPE_SHARED_4BIT, "rotation_groups": TYPE_ROTATION_GROUPS[16]},
 }
 
 TIMING_LOG_FIELDS = {
